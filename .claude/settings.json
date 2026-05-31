@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(cargo add *)",
+      "Bash(brew list *)",
+      "Bash(pkg-config --libs libturbojpeg)",
+      "Bash(cargo remove *)",
+      "Bash(npx shadcn@latest init --yes)",
+      "Bash(npx shadcn@latest init -y --base-color neutral)",
+      "Bash(npx shadcn@latest init -t vite -b radix -y)",
+      "Bash(npx shadcn@latest init -t vite -b radix -y -p nova)",
+      "Bash(npx shadcn@latest add button)",
+      "Bash(npx shadcn@latest add card separator)",
+      "Bash(npx *)",
+      "Bash(npm run *)",
+      "Bash(npm remove *)",
+      "Bash(npm view *)",
+      "Bash(npm -v)",
+      "Bash(cargo build *)"
+    ]
+  }
+}

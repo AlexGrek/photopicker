@@ -1,0 +1,693 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+  }
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Photo gallery                                                       */
+/* ------------------------------------------------------------------ */
+
+.ph-gallery {
+  min-height: 100vh;
+  padding: 0 6px 24px;
+}
+
+.ph-gallery-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 6px;
+  margin-bottom: 4px;
+  background: hsl(var(--background) / 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.ph-gallery-title {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.ph-gallery-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ph-gallery-count {
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.ph-gallery-loading {
+  animation: ph-pulse 1.4s ease-in-out infinite;
+}
+
+/* Rating + flag filters, pinned to the right of the gallery header. */
+.ph-gallery-filters {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 2px;
+}
+
+.ph-filter-stars {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.ph-filter-star,
+.ph-filter-flag {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px;
+  border-radius: 7px;
+  color: hsl(var(--muted-foreground));
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.ph-filter-star:hover,
+.ph-filter-flag:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--accent));
+}
+
+.ph-filter-flag {
+  margin-left: 4px;
+}
+
+.ph-filter-star-on {
+  color: #f59e0b;
+}
+
+.ph-filter-flag-on {
+  color: #2563eb;
+  background: hsl(var(--accent));
+}
+
+.ph-filter-star-on svg,
+.ph-filter-flag-on svg {
+  fill: currentColor;
+}
+
+.ph-gallery-message {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 64px 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.9rem;
+}
+
+.ph-masonry {
+  width: 100%;
+}
+
+/* Loading skeleton — a CSS-columns masonry of shimmering placeholders shown while
+   a slow/huge directory is still being read. Column count is set inline to match
+   the real grid; margins mirror the .ph-cell padding so tiles line up identically. */
+.ph-skeleton {
+  column-gap: 0;
+  padding-top: 4px;
+}
+
+.ph-skeleton-tile {
+  break-inside: avoid;
+  margin: 3px;
+  border-radius: 6px;
+  border: 1px solid hsl(var(--border));
+}
+
+/* Tiles ------------------------------------------------------------- */
+
+.ph-cell {
+  padding: 3px;
+}
+
+.ph-tile {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 6px;
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+  cursor: pointer;
+  transition: outline-color 0.12s ease;
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+}
+
+.ph-tile:hover {
+  outline-color: hsl(var(--ring) / 0.6);
+}
+
+.ph-tile-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  animation: ph-fade 0.25s ease both;
+}
+
+.ph-tile-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: hsl(var(--muted-foreground));
+}
+
+.ph-tile-skeleton {
+  background: linear-gradient(
+    100deg,
+    hsl(var(--muted)) 30%,
+    hsl(var(--accent)) 50%,
+    hsl(var(--muted)) 70%
+  );
+  background-size: 200% 100%;
+  animation: ph-shimmer 1.3s linear infinite;
+}
+
+@keyframes ph-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ph-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes ph-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Lightbox ---------------------------------------------------------- */
+
+.ph-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #000;
+  animation: ph-fade 0.15s ease both;
+}
+
+/* One photo in the kept-mounted window. Inactive neighbours stay loaded but
+   hidden, so stepping prev/next shows an already-decoded original instantly. */
+.ph-lb-slide {
+  position: absolute;
+  inset: 0;
+}
+
+.ph-lb-slide:not(.ph-lb-slide-active) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ph-lb-slide-active {
+  z-index: 1;
+}
+
+/* Both the placeholder and the real photo fill the whole screen, edge to edge. */
+.ph-lb-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* The small thumbnail blown up to fill the screen while the original loads. */
+.ph-lb-placeholder {
+  filter: blur(1px);
+}
+
+.ph-lb-full {
+  transition: opacity 0.25s ease;
+}
+
+.ph-lb-loading {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.ph-lb-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px 16px 16px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.55), transparent);
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+/* Counter + name fade out a beat after switching photos (or leaving the bottom). */
+.ph-lb-bar-hidden {
+  opacity: 0;
+  transition: opacity 0.6s ease 0.35s;
+}
+
+.ph-lb-count {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+}
+
+.ph-lb-name {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70vw;
+}
+
+.ph-lb-close,
+.ph-lb-nav {
+  position: fixed;
+  /* Above the active slide (z-index 1), which spans the whole viewport. */
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background 0.12s ease, opacity 0.2s ease;
+}
+
+/* Edge controls fade away gradually once the cursor leaves their edge. */
+.ph-lb-chrome-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.5s ease 0.35s;
+}
+
+.ph-lb-close:hover,
+.ph-lb-nav:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.ph-lb-close {
+  top: 16px;
+  right: 16px;
+  width: 40px;
+  height: 40px;
+}
+
+.ph-lb-nav {
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 48px;
+}
+
+.ph-lb-prev {
+  left: 16px;
+}
+
+.ph-lb-next {
+  right: 16px;
+}
+
+/* Bottom culling toolbar — revealed when the cursor nears the bottom edge,
+   floating just above the filename bar. */
+.ph-lb-toolbar {
+  position: fixed;
+  left: 50%;
+  bottom: 44px;
+  transform: translateX(-50%) translateY(0);
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: rgba(20, 20, 22, 0.78);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.ph-lb-toolbar-hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(14px);
+  pointer-events: none;
+}
+
+.ph-lb-tbtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  border-radius: 9999px;
+  color: rgba(255, 255, 255, 0.92);
+  background: transparent;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.ph-lb-tbtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.ph-lb-tbtn:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.ph-lb-tbtn-on {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.ph-lb-tbtn kbd {
+  font-size: 0.62rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.6);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ph-lb-tsep {
+  width: 1px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.18);
+  margin: 0 2px;
+}
+
+/* Delete control: a normal toolbar button that morphs into a danger-tinted
+   confirm/cancel panel in place when clicked. */
+.ph-lb-delete {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 9999px;
+  transition: background 0.18s ease, box-shadow 0.18s ease, padding 0.18s ease;
+}
+
+.ph-lb-delete-armed {
+  padding: 0 4px 0 12px;
+  background: rgba(220, 38, 38, 0.22);
+  box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.5);
+}
+
+.ph-lb-delete-q {
+  font-size: 0.82rem;
+  color: #fca5a5;
+  white-space: nowrap;
+  animation: ph-pop 0.16s ease both;
+}
+
+.ph-lb-delete-yes,
+.ph-lb-delete-no {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+  animation: ph-pop 0.16s ease both;
+}
+
+.ph-lb-delete-yes {
+  color: #fff;
+  background: #dc2626;
+}
+
+.ph-lb-delete-yes:hover {
+  background: #ef4444;
+}
+
+.ph-lb-delete-no {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ph-lb-delete-no:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+@keyframes ph-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.ph-lb-marks {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.ph-lb-star {
+  display: flex;
+  padding: 5px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.4);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.ph-lb-star:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.ph-lb-star-on {
+  color: #fbbf24;
+}
+
+.ph-lb-star-on svg {
+  fill: currentColor;
+}
+
+/* Transient feedback toast (copy result, hints) above the toolbar. */
+.ph-lb-status {
+  position: fixed;
+  left: 50%;
+  bottom: 104px;
+  transform: translateX(-50%);
+  z-index: 56;
+  padding: 8px 14px;
+  border-radius: 9999px;
+  background: rgba(20, 20, 22, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.8rem;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: ph-fade 0.15s ease both;
+}
+
+/* Copy-target chooser, shown when more than one target location is configured. */
+.ph-lb-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 104px;
+}
+
+.ph-lb-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 240px;
+  max-width: 70vw;
+  padding: 6px;
+  background: rgba(28, 28, 30, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
+  animation: ph-fade 0.12s ease both;
+}
+
+.ph-lb-menu-title {
+  padding: 6px 10px 4px;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.ph-lb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.92);
+  background: transparent;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.ph-lb-menu-item:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Keyboard / gamepad highlight (the destination Enter or C/M will act on). */
+.ph-lb-menu-item-selected,
+.ph-lb-menu-item-selected:hover {
+  background: rgba(255, 255, 255, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+}
+
+/* "Browse…" sits below the saved targets, set off by a hairline. */
+.ph-lb-menu-browse {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.ph-lb-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ph-lb-menu-hint {
+  padding: 6px 10px 2px;
+  font-size: 0.68rem;
+  color: rgba(255, 255, 255, 0.45);
+  text-align: center;
+}
