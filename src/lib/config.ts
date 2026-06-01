@@ -7,4 +7,5 @@ export interface Config {
   targetDirectories: string[];
   lightboxInFullscreen: boolean;
   enableRawCouplingDetection: boolean;
+  exifOverlayEnabled: boolean;
 }

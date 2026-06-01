@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Camera,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -19,6 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { origUrl, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
+import { getExifInfo, overlayHasData, type ExifInfo, type ExifOverlay } from "@/lib/exif";
 import { useGamepad } from "@/lib/gamepad";
 import { shortenPath } from "@/lib/utils";
 import { type Config } from "@/lib/config";
@@ -83,9 +85,15 @@ export function Lightbox({
   const [status, setStatus] = useState<string | null>(null);
   const [lightboxInFullscreen, setLightboxInFullscreen] = useState<boolean | null>(null);
   const [rotateNonceByPath, setRotateNonceByPath] = useState<Record<string, number>>({});
+  const [exifModalOpen, setExifModalOpen] = useState(false);
+  const [exifInfo, setExifInfo] = useState<ExifInfo | null>(null);
+  const [exifLoading, setExifLoading] = useState(false);
+  const [exifOverlayEnabled, setExifOverlayEnabled] = useState(false);
+  const [savingExifOverlay, setSavingExifOverlay] = useState(false);
 
   const mark = marks[entry.name] ?? EMPTY_MARK;
-  const showToolbar = toolbarShown || menuMode !== null || confirmingDelete;
+  const showToolbar = toolbarShown || menuMode !== null || confirmingDelete || exifModalOpen;
+  const rotateNonce = rotateNonceByPath[entry.path] ?? 0;
   const showInfo = infoFlash || toolbarShown;
 
   // Load this directory's saved marks + the configured copy targets.
@@ -100,6 +108,7 @@ export function Lightbox({
         if (!alive) return;
         setTargets(cfg.targetDirectories);
         setLightboxInFullscreen(cfg.lightboxInFullscreen);
+        setExifOverlayEnabled(cfg.exifOverlayEnabled);
       },
       () => {},
     );
@@ -107,6 +116,30 @@ export function Lightbox({
       alive = false;
     };
   }, [dir]);
+
+  // Load EXIF when the modal is open or the always-on overlay is enabled.
+  useEffect(() => {
+    if (!exifModalOpen && !exifOverlayEnabled) {
+      setExifInfo(null);
+      setExifLoading(false);
+      return;
+    }
+    let alive = true;
+    setExifLoading(true);
+    getExifInfo(entry.path)
+      .then((info) => {
+        if (alive) setExifInfo(info);
+      })
+      .catch(() => {
+        if (alive) setExifInfo(null);
+      })
+      .finally(() => {
+        if (alive) setExifLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [entry.path, exifModalOpen, exifOverlayEnabled, rotateNonce]);
 
   // Drive the OS window into fullscreen for as long as the lightbox is open,
   // restoring the previous state on close (unless the user was already fullscreen).
@@ -156,9 +189,25 @@ export function Lightbox({
   useEffect(() => {
     setInfoFlash(true);
     setConfirmingDelete(false);
+    setExifModalOpen(false);
     const t = setTimeout(() => setInfoFlash(false), INFO_FLASH_MS);
     return () => clearTimeout(t);
   }, [index]);
+
+  async function toggleExifOverlay(next: boolean) {
+    if (savingExifOverlay) return;
+    setSavingExifOverlay(true);
+    setExifOverlayEnabled(next);
+    try {
+      const cfg = await invoke<Config>("get_config");
+      const updated: Config = { ...cfg, exifOverlayEnabled: next };
+      await invoke("save_config", { config: updated });
+    } catch {
+      setExifOverlayEnabled((prev) => !prev);
+    } finally {
+      setSavingExifOverlay(false);
+    }
+  }
 
   // Auto-dismiss the transient status toast.
   useEffect(() => {
@@ -274,6 +323,10 @@ export function Lightbox({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
+      if (exifModalOpen) {
+        if (e.key === "Escape") return setExifModalOpen(false);
+        return;
+      }
       // While the destination chooser is open, ↑/↓ cycle it and Enter confirms.
       if (menuMode) {
         if (e.key === "Escape") return setMenuMode(null);
@@ -305,9 +358,13 @@ export function Lightbox({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, mark, targets, menuMode, menuIndex, confirmingDelete, hasPrev, hasNext, onClose, onIndex]);
+  }, [index, mark, targets, menuMode, menuIndex, confirmingDelete, exifModalOpen, hasPrev, hasNext, onClose, onIndex]);
 
   useGamepad((button) => {
+    if (exifModalOpen) {
+      if (button === "b") setExifModalOpen(false);
+      return;
+    }
     // Y mirrors the C key everywhere (open the copy chooser / confirm a copy).
     if (button === "y") return requestSend("copy");
     if (button === "lb") return void rotateCurrent(false);
@@ -336,6 +393,7 @@ export function Lightbox({
           entry={entries[i]}
           active={i === index}
           nonce={rotateNonceByPath[entries[i].path] ?? 0}
+          overlay={exifOverlayEnabled && i === index ? exifInfo?.overlay ?? null : null}
         />
       ))}
 
@@ -377,6 +435,57 @@ export function Lightbox({
       </div>
 
       {status && <div className="ph-lb-status">{status}</div>}
+
+      {exifModalOpen && (
+        <div className="ph-lb-exif-backdrop" onClick={() => setExifModalOpen(false)}>
+          <div className="ph-lb-exif-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="ph-lb-exif-header">
+              <span className="ph-lb-exif-title">EXIF</span>
+              <button
+                type="button"
+                className="ph-lb-exif-close"
+                onClick={() => setExifModalOpen(false)}
+                aria-label="Close EXIF"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <label className="ph-lb-exif-toggle-row">
+              <span>Enable EXIF overlay</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={exifOverlayEnabled}
+                className={`ph-lb-exif-toggle${exifOverlayEnabled ? " ph-lb-exif-toggle-on" : ""}`}
+                disabled={savingExifOverlay}
+                onClick={() => void toggleExifOverlay(!exifOverlayEnabled)}
+              >
+                <span className="ph-lb-exif-toggle-knob" />
+              </button>
+            </label>
+            <div className="ph-lb-exif-body">
+              {exifLoading ? (
+                <div className="ph-lb-exif-loading">
+                  <Loader2 className="mx-auto h-5 w-5 animate-spin" />
+                </div>
+              ) : !exifInfo?.fields.length ? (
+                <p className="ph-lb-exif-empty">No EXIF data found for this file.</p>
+              ) : (
+                <table className="ph-lb-exif-table">
+                  <tbody>
+                    {exifInfo.fields.map((f) => (
+                      <tr key={f.label}>
+                        <th scope="row">{f.label}</th>
+                        <td>{f.value}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {menuMode && (
         <div className="ph-lb-menu-backdrop" onClick={() => setMenuMode(null)}>
@@ -430,6 +539,19 @@ export function Lightbox({
         </button>
 
         <span className="ph-lb-tsep" />
+
+        <button
+          type="button"
+          className={`ph-lb-tbtn${exifModalOpen ? " ph-lb-tbtn-on" : ""}`}
+          onClick={() => {
+            setToolbarShown(true);
+            setExifModalOpen(true);
+          }}
+          title="EXIF info"
+          aria-label="EXIF info"
+        >
+          <Camera className="h-4 w-4" />
+        </button>
 
         <button
           type="button"
@@ -526,7 +648,17 @@ export function Lightbox({
  * the full-resolution original fading in over it. Inactive slides stay mounted
  * (hidden) so their decoded original is retained for instant navigation.
  */
-function Slide({ entry, active, nonce }: { entry: ImageEntry; active: boolean; nonce: number }) {
+function Slide({
+  entry,
+  active,
+  nonce,
+  overlay,
+}: {
+  entry: ImageEntry;
+  active: boolean;
+  nonce: number;
+  overlay: ExifOverlay | null;
+}) {
   const [fullLoaded, setFullLoaded] = useState(false);
   const thumbSrc = `${thumbUrl(entry, 256)}&r=${nonce}`;
   const fullSrc = entry.raw ? `${thumbUrl(entry, 2048)}&r=${nonce}` : `${origUrl(entry)}?r=${nonce}`;
@@ -555,6 +687,14 @@ function Slide({ entry, active, nonce }: { entry: ImageEntry; active: boolean; n
       {active && !fullLoaded && (
         <div className="ph-lb-loading">
           <Loader2 className="h-5 w-5 animate-spin" />
+        </div>
+      )}
+      {active && overlay && overlayHasData(overlay) && (
+        <div className="ph-lb-exif-overlay" aria-hidden>
+          {overlay.lens && <span>{overlay.lens}</span>}
+          {(overlay.shutter || overlay.iso) && (
+            <span>{[overlay.shutter, overlay.iso].filter(Boolean).join(" · ")}</span>
+          )}
         </div>
       )}
     </div>

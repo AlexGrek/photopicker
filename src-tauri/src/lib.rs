@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use config::Config;
-use images::ImageEntry;
+use images::{ExifInfo, ImageEntry};
 use little_exif::exif_tag::ExifTag;
 use little_exif::ifd::ExifTagGroup;
 use little_exif::metadata::Metadata;
@@ -109,6 +109,14 @@ async fn list_images(dir: String) -> Result<Vec<ImageEntry>, String> {
 #[tauri::command]
 async fn list_shot_dates(dir: String, raw_coupling: bool) -> Result<HashMap<String, u64>, String> {
     tauri::async_runtime::spawn_blocking(move || images::list_shot_dates(&dir, raw_coupling))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Reads EXIF metadata for one file (bounded prefix read; whole file only when needed).
+#[tauri::command]
+async fn get_exif_info(path: String) -> Result<ExifInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || images::read_exif_info(&path))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -526,6 +534,7 @@ pub fn run() {
             delete_file,
             list_images,
             list_shot_dates,
+            get_exif_info,
             take_pending_open,
         ])
         .build(tauri::generate_context!())

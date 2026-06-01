@@ -10,6 +10,10 @@ fn default_enable_raw_coupling_detection() -> bool {
     true
 }
 
+fn default_exif_overlay_enabled() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -30,6 +34,9 @@ pub struct Config {
     /// Whether RAW coupling auto-detection should run when opening a gallery.
     #[serde(default = "default_enable_raw_coupling_detection")]
     pub enable_raw_coupling_detection: bool,
+    /// When true, the lightbox shows lens / shutter / ISO over the photo.
+    #[serde(default = "default_exif_overlay_enabled")]
+    pub exif_overlay_enabled: bool,
 }
 
 impl Default for Config {
@@ -42,6 +49,7 @@ impl Default for Config {
             target_directories: Vec::new(),
             lightbox_in_fullscreen: default_lightbox_in_fullscreen(),
             enable_raw_coupling_detection: default_enable_raw_coupling_detection(),
+            exif_overlay_enabled: default_exif_overlay_enabled(),
         }
     }
 }

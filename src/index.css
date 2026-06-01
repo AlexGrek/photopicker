@@ -1147,6 +1147,170 @@
   white-space: nowrap;
 }
 
+/* EXIF info modal + always-on shooting overlay ---------------------- */
+
+.ph-lb-exif-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.ph-lb-exif-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 100%);
+  max-height: min(80vh, 640px);
+  border-radius: 12px;
+  background: rgba(24, 24, 24, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.ph-lb-exif-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ph-lb-exif-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.ph-lb-exif-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.ph-lb-exif-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.ph-lb-exif-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.ph-lb-exif-toggle {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.ph-lb-exif-toggle-on {
+  background: rgba(96, 165, 250, 0.85);
+}
+
+.ph-lb-exif-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: white;
+  transition: transform 0.15s ease;
+}
+
+.ph-lb-exif-toggle-on .ph-lb-exif-toggle-knob {
+  transform: translateX(18px);
+}
+
+.ph-lb-exif-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 0 12px;
+}
+
+.ph-lb-exif-loading,
+.ph-lb-exif-empty {
+  padding: 24px 16px;
+  text-align: center;
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.ph-lb-exif-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.ph-lb-exif-table th,
+.ph-lb-exif-table td {
+  padding: 6px 16px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ph-lb-exif-table th {
+  width: 38%;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+}
+
+.ph-lb-exif-table td {
+  color: rgba(255, 255, 255, 0.88);
+  word-break: break-word;
+}
+
+.ph-lb-exif-table tr:nth-child(even) td,
+.ph-lb-exif-table tr:nth-child(even) th {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ph-lb-exif-overlay {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: min(70vw, 420px);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.9);
+  text-align: right;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
 .ph-lb-menu-hint {
   padding: 6px 10px 2px;
   font-size: 0.68rem;

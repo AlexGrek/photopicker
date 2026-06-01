@@ -420,3 +420,146 @@ fn encode_jpeg(rgb: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, Strin
         .map_err(|e| e.to_string())?;
     Ok(out)
 }
+
+/// One EXIF tag for the info modal.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExifField {
+    pub label: String,
+    pub value: String,
+}
+
+/// Short strings for the always-on lightbox overlay.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExifOverlay {
+    pub lens: Option<String>,
+    pub shutter: Option<String>,
+    pub iso: Option<String>,
+}
+
+/// Full EXIF read for a single file (prefix read, whole file only when needed).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExifInfo {
+    pub fields: Vec<ExifField>,
+    pub overlay: ExifOverlay,
+}
+
+fn parse_exif_container(bytes: &[u8]) -> Option<exif::Exif> {
+    let mut cursor = Cursor::new(bytes);
+    exif::Reader::new().read_from_container(&mut cursor).ok()
+}
+
+fn load_exif_container(path: &str) -> Result<Option<exif::Exif>, String> {
+    let path_obj = PathBuf::from(path);
+    let raw_file = is_raw_path(&path_obj);
+    let total_len = fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let prefix = read_prefix(path, PREFIX_CAP.min(total_len.max(1)))?;
+    if let Some(exif) = parse_exif_container(&prefix) {
+        return Ok(Some(exif));
+    }
+    if raw_file || (prefix.len() as u64) < total_len {
+        let full = read_whole_if_needed(path, &prefix, total_len)?;
+        return Ok(parse_exif_container(&full));
+    }
+    Ok(None)
+}
+
+fn field_display(field: &exif::Field) -> String {
+    format!("{}", field.display_value().with_unit(field))
+}
+
+fn format_exposure(exif: &exif::Exif) -> Option<String> {
+    let field = exif.get_field(exif::Tag::ExposureTime, exif::In::PRIMARY)?;
+    if let exif::Value::Rational(ref v) = field.value {
+        if let Some(r) = v.first() {
+            if r.denom == 0 {
+                return None;
+            }
+            if r.num >= r.denom {
+                let secs = r.num as f64 / r.denom as f64;
+                return Some(format!("{secs:.1}s"));
+            }
+            if r.denom.is_multiple_of(r.num) {
+                return Some(format!("1/{}s", r.denom / r.num));
+            }
+            return Some(format!("{}/{}s", r.num, r.denom));
+        }
+    }
+    let s = field_display(field);
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn format_iso(exif: &exif::Exif) -> Option<String> {
+    for tag in [exif::Tag::PhotographicSensitivity, exif::Tag::ISOSpeed] {
+        let Some(field) = exif.get_field(tag, exif::In::PRIMARY) else {
+            continue;
+        };
+        let s = field_display(&field);
+        if s.is_empty() {
+            continue;
+        }
+        return Some(if s.to_ascii_uppercase().starts_with("ISO") {
+            s
+        } else {
+            format!("ISO {s}")
+        });
+    }
+    None
+}
+
+fn format_lens(exif: &exif::Exif) -> Option<String> {
+    if let Some(field) = exif.get_field(exif::Tag::LensModel, exif::In::PRIMARY) {
+        let s = field_display(&field);
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    let make = exif
+        .get_field(exif::Tag::LensMake, exif::In::PRIMARY)
+        .map(field_display)
+        .filter(|s| !s.is_empty());
+    let model = exif
+        .get_field(exif::Tag::LensSpecification, exif::In::PRIMARY)
+        .map(field_display)
+        .filter(|s| !s.is_empty());
+    match (make, model) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+fn build_exif_overlay(exif: &exif::Exif) -> ExifOverlay {
+    ExifOverlay {
+        lens: format_lens(exif),
+        shutter: format_exposure(exif),
+        iso: format_iso(exif),
+    }
+}
+
+/// Reads EXIF metadata from `path` for the lightbox info modal and overlay.
+pub fn read_exif_info(path: &str) -> Result<ExifInfo, String> {
+    let Some(exif) = load_exif_container(path)? else {
+        return Ok(ExifInfo {
+            fields: Vec::new(),
+            overlay: ExifOverlay::default(),
+        });
+    };
+
+    let mut fields: Vec<ExifField> = exif
+        .fields()
+        .map(|f| ExifField {
+            label: format!("{}", f.tag),
+            value: field_display(f),
+        })
+        .filter(|f| !f.value.is_empty())
+        .collect();
+    fields.sort_by(|a, b| a.label.cmp(&b.label));
+
+    Ok(ExifInfo {
+        overlay: build_exif_overlay(&exif),
+        fields,
+    })
+}
