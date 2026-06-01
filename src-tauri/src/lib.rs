@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use config::Config;
 use images::ImageEntry;
+use little_exif::exif_tag::ExifTag;
+use little_exif::ifd::ExifTagGroup;
+use little_exif::metadata::Metadata;
 use marks::{Mark, MarksDb};
 use serde::Serialize;
 use tauri::http::{Request, Response};
@@ -154,6 +157,181 @@ fn get_marks(db: State<MarksDb>, dir: String) -> Result<HashMap<String, Mark>, S
 #[tauri::command]
 fn set_mark(db: State<MarksDb>, dir: String, name: String, mark: Mark) -> Result<(), String> {
     db.set(&dir, &name, &mark)
+}
+
+/// Clears all flags in `dir` while preserving star ratings.
+#[tauri::command]
+fn clear_flags(db: State<MarksDb>, dir: String) -> Result<u32, String> {
+    let marks = db.get_all(&dir)?;
+    let mut changed = 0u32;
+    for (name, mark) in marks {
+        if !mark.flag {
+            continue;
+        }
+        db.set(
+            &dir,
+            &name,
+            &Mark {
+                rating: mark.rating,
+                flag: false,
+            },
+        )?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// Clears all star ratings in `dir` while preserving flags.
+#[tauri::command]
+fn clear_stars(db: State<MarksDb>, dir: String) -> Result<u32, String> {
+    let marks = db.get_all(&dir)?;
+    let mut changed = 0u32;
+    for (name, mark) in marks {
+        if mark.rating == 0 {
+            continue;
+        }
+        db.set(
+            &dir,
+            &name,
+            &Mark {
+                rating: 0,
+                flag: mark.flag,
+            },
+        )?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExifWriteSummary {
+    written: u32,
+    skipped: u32,
+    failed: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RotateImageResult {
+    orientation: u16,
+    modified: Option<u64>,
+}
+
+fn is_rating_writable(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("jpg" | "jpeg" | "jpe" | "jfif")
+    )
+}
+
+fn rating_percent(rating: u8) -> u16 {
+    (rating as u16).saturating_mul(20).min(100)
+}
+
+fn write_rating_to_exif(path: &Path, rating: u8) -> Result<(), String> {
+    let mut metadata = Metadata::new_from_path(path).unwrap_or_default();
+    // Microsoft rating tags commonly consumed by DAM tools.
+    metadata.remove_tag_by_hex_group(0x4746, ExifTagGroup::GENERIC);
+    metadata.remove_tag_by_hex_group(0x4749, ExifTagGroup::GENERIC);
+    if rating > 0 {
+        metadata.set_tag(ExifTag::UnknownINT16U(vec![rating as u16], 0x4746, ExifTagGroup::GENERIC));
+        metadata.set_tag(ExifTag::UnknownINT16U(
+            vec![rating_percent(rating)],
+            0x4749,
+            ExifTagGroup::GENERIC,
+        ));
+    }
+    metadata
+        .write_to_file(path)
+        .map_err(|e| format!("{}: {}", path.display(), e))
+}
+
+fn rotate_orientation(current: u16, clockwise: bool) -> u16 {
+    match (current, clockwise) {
+        (1, true) => 6,
+        (2, true) => 7,
+        (3, true) => 8,
+        (4, true) => 5,
+        (5, true) => 2,
+        (6, true) => 3,
+        (7, true) => 4,
+        (8, true) => 1,
+        (1, false) => 8,
+        (2, false) => 5,
+        (3, false) => 6,
+        (4, false) => 7,
+        (5, false) => 4,
+        (6, false) => 1,
+        (7, false) => 2,
+        (8, false) => 3,
+        (_, _) => {
+            if clockwise {
+                6
+            } else {
+                8
+            }
+        }
+    }
+}
+
+fn file_modified_ms(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+}
+
+/// Rotates a JPEG by updating only EXIF orientation metadata (no pixel rewrite).
+#[tauri::command]
+fn rotate_image_exif(path: String, clockwise: bool) -> Result<RotateImageResult, String> {
+    let image_path = PathBuf::from(&path);
+    if !is_rating_writable(&image_path) {
+        return Err("Rotation is supported only for JPEG files".into());
+    }
+    let mut metadata = Metadata::new_from_path(&image_path).unwrap_or_default();
+    let current = metadata
+        .get_tag(&ExifTag::Orientation(Vec::new()))
+        .next()
+        .and_then(|tag| match tag {
+            ExifTag::Orientation(values) => values.first().copied(),
+            _ => None,
+        })
+        .filter(|v| (1..=8).contains(v))
+        .unwrap_or(1);
+    let next = rotate_orientation(current, clockwise);
+    metadata.set_tag(ExifTag::Orientation(vec![next]));
+    metadata
+        .write_to_file(&image_path)
+        .map_err(|e| format!("{}: {}", image_path.display(), e))?;
+    Ok(RotateImageResult {
+        orientation: next,
+        modified: file_modified_ms(&image_path),
+    })
+}
+
+/// Writes current star ratings from the marks database into image EXIF tags.
+#[tauri::command]
+fn write_stars_to_exif(db: State<MarksDb>, dir: String) -> Result<ExifWriteSummary, String> {
+    let marks = db.get_all(&dir)?;
+    let mut summary = ExifWriteSummary {
+        written: 0,
+        skipped: 0,
+        failed: 0,
+    };
+    for (name, mark) in marks {
+        let path = PathBuf::from(&dir).join(&name);
+        if !path.exists() || !is_rating_writable(&path) {
+            summary.skipped += 1;
+            continue;
+        }
+        match write_rating_to_exif(&path, mark.rating) {
+            Ok(()) => summary.written += 1,
+            Err(_) => summary.failed += 1,
+        }
+    }
+    Ok(summary)
 }
 
 /// Picks a non-clobbering path inside `target_dir` for a file named like `src`'s
@@ -339,6 +517,10 @@ pub fn run() {
             remove_target_directory,
             get_marks,
             set_mark,
+            clear_flags,
+            clear_stars,
+            write_stars_to_exif,
+            rotate_image_exif,
             copy_to_target,
             move_to_target,
             delete_file,

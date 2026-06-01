@@ -3,15 +3,17 @@ import { useEffect, useRef } from "react";
 /**
  * Logical buttons we react to, mapped to indices in the W3C "standard" gamepad
  * mapping (https://w3c.github.io/gamepad/#remapping). The d-pad is buttons
- * 12–15; the face buttons are 0–3 — A/B/X/Y on Xbox (✕/◯/▢/△ on PlayStation).
+ * 12–15; the face buttons are 0–3; bumpers are 4/5.
  */
-export type GamepadButton = "up" | "down" | "left" | "right" | "a" | "b" | "x" | "y";
+export type GamepadButton = "up" | "down" | "left" | "right" | "a" | "b" | "x" | "y" | "lb" | "rb";
 
 const BUTTON_INDEX: Record<GamepadButton, number> = {
   a: 0,
   b: 1,
   x: 2,
   y: 3,
+  lb: 4,
+  rb: 5,
   up: 12,
   down: 13,
   left: 14,

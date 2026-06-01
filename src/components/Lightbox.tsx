@@ -12,6 +12,8 @@ import {
   FolderOutput,
   FolderSearch,
   Loader2,
+  RotateCcw,
+  RotateCw,
   Star,
   Trash2,
   X,
@@ -20,7 +22,7 @@ import { origUrl, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import { useGamepad } from "@/lib/gamepad";
 import { shortenPath } from "@/lib/utils";
 import { type Config } from "@/lib/config";
-import { EMPTY_MARK, copyToTarget, deleteFile, getMarks, moveToTarget, setMark, type Mark } from "@/lib/marks";
+import { EMPTY_MARK, copyToTarget, deleteFile, getMarks, moveToTarget, rotateImage, setMark, type Mark } from "@/lib/marks";
 
 /** How close to an edge (px) the cursor must be to reveal that edge's controls. */
 const EDGE_REVEAL_PX = 120;
@@ -52,6 +54,7 @@ export function Lightbox({
   onIndex,
   onClose,
   onRemoved,
+  onEntryUpdated,
   actionPathsByPath,
 }: {
   dir: string;
@@ -62,6 +65,8 @@ export function Lightbox({
   /** Called with photo paths after they leave the directory (moved or deleted),
    *  so the host can drop that tile from the grid. */
   onRemoved: (paths: string[]) => void;
+  /** Called after in-place metadata edits (e.g. rotation) to refresh cache version. */
+  onEntryUpdated: (path: string, modified: number | null) => void;
   /** Optional action override (e.g. RAW coupling) keyed by visible entry path. */
   actionPathsByPath: Record<string, string[]>;
 }) {
@@ -77,6 +82,7 @@ export function Lightbox({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [lightboxInFullscreen, setLightboxInFullscreen] = useState<boolean | null>(null);
+  const [rotateNonceByPath, setRotateNonceByPath] = useState<Record<string, number>>({});
 
   const mark = marks[entry.name] ?? EMPTY_MARK;
   const showToolbar = toolbarShown || menuMode !== null || confirmingDelete;
@@ -166,6 +172,19 @@ export function Lightbox({
   const goPrev = () => hasPrev && onIndex(index - 1);
   const goNext = () => hasNext && onIndex(index + 1);
   const actionPathsFor = (e: ImageEntry) => actionPathsByPath[e.path] ?? [e.path];
+  const canRotate = !entry.raw;
+
+  async function rotateCurrent(clockwise: boolean) {
+    if (!canRotate) return;
+    try {
+      const res = await rotateImage(entry.path, clockwise);
+      onEntryUpdated(entry.path, res.modified);
+      setRotateNonceByPath((prev) => ({ ...prev, [entry.path]: (prev[entry.path] ?? 0) + 1 }));
+      setStatus(`Rotated ${clockwise ? "clockwise" : "counter-clockwise"}`);
+    } catch (e) {
+      setStatus(`Rotate failed: ${String(e)}`);
+    }
+  }
 
   function applyMark(next: Mark) {
     setMarks((m) => ({ ...m, [entry.name]: next }));
@@ -291,6 +310,8 @@ export function Lightbox({
   useGamepad((button) => {
     // Y mirrors the C key everywhere (open the copy chooser / confirm a copy).
     if (button === "y") return requestSend("copy");
+    if (button === "lb") return void rotateCurrent(false);
+    if (button === "rb") return void rotateCurrent(true);
     // In the chooser, the d-pad cycles destinations, A confirms, B cancels.
     if (menuMode) {
       if (button === "up") cycleMenu(-1);
@@ -310,7 +331,12 @@ export function Lightbox({
   return (
     <div className="ph-lightbox">
       {window_.map((i) => (
-        <Slide key={entries[i].path} entry={entries[i]} active={i === index} />
+        <Slide
+          key={entries[i].path}
+          entry={entries[i]}
+          active={i === index}
+          nonce={rotateNonceByPath[entries[i].path] ?? 0}
+        />
       ))}
 
       <button
@@ -405,6 +431,29 @@ export function Lightbox({
 
         <span className="ph-lb-tsep" />
 
+        <button
+          type="button"
+          className="ph-lb-tbtn"
+          onClick={() => rotateCurrent(false)}
+          disabled={!canRotate}
+          title="Rotate counter-clockwise"
+          aria-label="Rotate counter-clockwise"
+        >
+          <RotateCcw className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          className="ph-lb-tbtn"
+          onClick={() => rotateCurrent(true)}
+          disabled={!canRotate}
+          title="Rotate clockwise"
+          aria-label="Rotate clockwise"
+        >
+          <RotateCw className="h-4 w-4" />
+        </button>
+
+        <span className="ph-lb-tsep" />
+
         <div className="ph-lb-marks" title="Rate 1–5 (press 0 to clear)">
           {[1, 2, 3, 4, 5].map((n) => (
             <button
@@ -477,14 +526,18 @@ export function Lightbox({
  * the full-resolution original fading in over it. Inactive slides stay mounted
  * (hidden) so their decoded original is retained for instant navigation.
  */
-function Slide({ entry, active }: { entry: ImageEntry; active: boolean }) {
+function Slide({ entry, active, nonce }: { entry: ImageEntry; active: boolean; nonce: number }) {
   const [fullLoaded, setFullLoaded] = useState(false);
-  const fullSrc = entry.raw ? thumbUrl(entry, 2048) : origUrl(entry);
+  const thumbSrc = `${thumbUrl(entry, 256)}&r=${nonce}`;
+  const fullSrc = entry.raw ? `${thumbUrl(entry, 2048)}&r=${nonce}` : `${origUrl(entry)}?r=${nonce}`;
+  useEffect(() => {
+    setFullLoaded(false);
+  }, [entry.path, nonce]);
   return (
     <div className={`ph-lb-slide${active ? " ph-lb-slide-active" : ""}`} aria-hidden={!active}>
       {/* Instant, stretched placeholder (cached grid thumbnail). */}
       <img
-        src={thumbUrl(entry, 256)}
+        src={thumbSrc}
         alt=""
         aria-hidden
         className="ph-lb-img ph-lb-placeholder"

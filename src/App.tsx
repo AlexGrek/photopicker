@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, Plus, Settings as SettingsIcon } from "lucide-react";
+import { FolderOpen, Gamepad2, Plus, Settings as SettingsIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Gallery } from "@/components/Gallery";
+import { GamepadControls } from "@/components/GamepadControls";
 import { Settings } from "@/components/Settings";
 import { type Config } from "@/lib/config";
 import { shortenPath } from "@/lib/utils";
@@ -14,7 +15,8 @@ import { shortenPath } from "@/lib/utils";
 type View =
   | { kind: "menu" }
   | { kind: "gallery"; dir: string; openFile?: string }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "gamepadControls" };
 
 /** An OS "Open with" / file-association request, resolved by the Rust backend. */
 interface OpenTarget {
@@ -106,20 +108,35 @@ export default function App() {
     return <Settings onBack={() => setView({ kind: "menu" })} />;
   }
 
+  if (view.kind === "gamepadControls") {
+    return <GamepadControls onBack={() => setView({ kind: "menu" })} />;
+  }
+
   return (
     <div className="min-h-screen bg-background flex flex-col items-center pt-16 px-4">
       <div className="w-full max-w-lg space-y-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold tracking-tight">PhotoPicker</h1>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => setView({ kind: "settings" })}
-            title="Settings"
-          >
-            <SettingsIcon className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setView({ kind: "gamepadControls" })}
+              title="Gamepad controls"
+            >
+              <Gamepad2 className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setView({ kind: "settings" })}
+              title="Settings"
+            >
+              <SettingsIcon className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
 
         <Card>

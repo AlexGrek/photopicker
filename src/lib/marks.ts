@@ -33,3 +33,34 @@ export function moveToTarget(src: string, targetDir: string): Promise<string> {
 export function deleteFile(path: string): Promise<void> {
   return invoke<void>("delete_file", { path });
 }
+
+/** Clears all flags in this directory's marks (ratings stay unchanged). */
+export function clearFlags(dir: string): Promise<number> {
+  return invoke<number>("clear_flags", { dir });
+}
+
+/** Clears all star ratings in this directory's marks (flags stay unchanged). */
+export function clearStars(dir: string): Promise<number> {
+  return invoke<number>("clear_stars", { dir });
+}
+
+export interface ExifWriteSummary {
+  written: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Writes stars from marks DB into EXIF metadata for supported files. */
+export function writeStarsToExif(dir: string): Promise<ExifWriteSummary> {
+  return invoke<ExifWriteSummary>("write_stars_to_exif", { dir });
+}
+
+export interface RotateImageResult {
+  orientation: number;
+  modified: number | null;
+}
+
+/** Rotates JPEG orientation metadata in-place. */
+export function rotateImage(path: string, clockwise: boolean): Promise<RotateImageResult> {
+  return invoke<RotateImageResult>("rotate_image_exif", { path, clockwise });
+}

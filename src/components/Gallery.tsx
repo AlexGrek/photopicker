@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { VirtuosoMasonry, type ItemContent } from "@virtuoso.dev/masonry";
-import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, Flag, ImageOff, SlidersHorizontal, Star, X } from "lucide-react";
+import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, Ellipsis, Flag, ImageOff, SlidersHorizontal, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { listImages, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import { type Config } from "@/lib/config";
-import { EMPTY_MARK, getMarks, type Mark } from "@/lib/marks";
+import { EMPTY_MARK, clearFlags, clearStars, getMarks, writeStarsToExif, type Mark } from "@/lib/marks";
 import { PhotoTile, type TileContext } from "./PhotoTile";
 import { Lightbox } from "./Lightbox";
 
@@ -181,8 +181,10 @@ export function Gallery({
   const [viewMode, setViewMode] = useState<ViewMode>("masonry");
   const [sortMode, setSortMode] = useState<SortMode>("nameAsc");
   const [rawCoupling, setRawCoupling] = useState(false);
-  const [showRawCouplingNotice, setShowRawCouplingNotice] = useState(false);
+  const [galleryNotice, setGalleryNotice] = useState<{ id: number; text: string } | null>(null);
   const [enableRawCouplingDetection, setEnableRawCouplingDetection] = useState(true);
+  const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [busyAction, setBusyAction] = useState<null | "flags" | "stars" | "write">(null);
   const [shotDateByPath, setShotDateByPath] = useState<Record<string, number>>({});
   const [shotDateKeyLoaded, setShotDateKeyLoaded] = useState<string | null>(null);
   const [browseMenuOpen, setBrowseMenuOpen] = useState(false);
@@ -190,6 +192,7 @@ export function Gallery({
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => monthStart(new Date()));
   const browseMenuRef = useRef<HTMLDivElement | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const dateDrawerRef = useRef<HTMLDivElement | null>(null);
   // Which `initialFile` we've already auto-opened, so later list changes (e.g. a
   // move/delete dropping a tile) never yank the lightbox back to the opened photo.
@@ -200,6 +203,7 @@ export function Gallery({
     setEntries(null);
     setError(null);
     setOpenIndex(null);
+    setActionMenuOpen(false);
     setBrowseMenuOpen(false);
     setDateDrawerOpen(false);
     setSelectedDay(null);
@@ -219,7 +223,7 @@ export function Gallery({
         setEntries(list);
         const autoEnabled = detectionEnabled && detectRawCouplingBySample(list);
         setRawCoupling(autoEnabled);
-        setShowRawCouplingNotice(autoEnabled);
+        if (autoEnabled) setGalleryNotice({ id: Date.now(), text: "Raw coupling enabled" });
       },
       (e) => {
         if (alive) setError(String(e));
@@ -235,10 +239,10 @@ export function Gallery({
   }, [dir]);
 
   useEffect(() => {
-    if (!showRawCouplingNotice) return;
-    const t = setTimeout(() => setShowRawCouplingNotice(false), 2600);
+    if (!galleryNotice) return;
+    const t = setTimeout(() => setGalleryNotice(null), 2600);
     return () => clearTimeout(t);
-  }, [showRawCouplingNotice]);
+  }, [galleryNotice]);
 
   const shotSort = sortMode === "shotDesc" || sortMode === "shotAsc";
   const shotDateLoadKey = `${dir}:${rawCoupling ? "coupled" : "plain"}`;
@@ -376,6 +380,17 @@ export function Gallery({
   }, [browseMenuOpen]);
 
   useEffect(() => {
+    if (!actionMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (actionMenuRef.current && !actionMenuRef.current.contains(e.target as Node)) {
+        setActionMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [actionMenuOpen]);
+
+  useEffect(() => {
     if (!dateDrawerOpen) return;
     const onDown = (e: MouseEvent) => {
       if (dateDrawerRef.current && !dateDrawerRef.current.contains(e.target as Node)) {
@@ -457,6 +472,15 @@ export function Gallery({
     getMarks(dir).then(setMarks, () => {});
   }
 
+  function handleEntryUpdated(path: string, modified: number | null) {
+    setEntries((prev) => {
+      if (!prev) return prev;
+      const next = prev.map((e) => (e.path === path ? { ...e, modified } : e));
+      entriesRef.current = next;
+      return next;
+    });
+  }
+
   const monthStartDate = monthStart(calendarMonth);
   const monthStartWeekday = monthStartDate.getDay();
   const monthDays = new Date(monthStartDate.getFullYear(), monthStartDate.getMonth() + 1, 0).getDate();
@@ -471,9 +495,45 @@ export function Gallery({
     setBrowseMenuOpen(false);
   }
 
+  function showNotice(text: string) {
+    setGalleryNotice({ id: Date.now(), text });
+  }
+
+  async function runBulkAction(kind: "flags" | "stars" | "write") {
+    if (busyAction) return;
+    setBusyAction(kind);
+    try {
+      if (kind === "flags") {
+        const changed = await clearFlags(dir);
+        const fresh = await getMarks(dir);
+        setMarks(fresh);
+        showNotice(`Removed flags from ${changed} photo${changed === 1 ? "" : "s"}`);
+      } else if (kind === "stars") {
+        const changed = await clearStars(dir);
+        const fresh = await getMarks(dir);
+        setMarks(fresh);
+        showNotice(`Removed stars from ${changed} photo${changed === 1 ? "" : "s"}`);
+      } else {
+        const summary = await writeStarsToExif(dir);
+        showNotice(
+          `EXIF written: ${summary.written}, skipped: ${summary.skipped}, failed: ${summary.failed}`,
+        );
+      }
+      setActionMenuOpen(false);
+    } catch (e) {
+      showNotice(`Action failed: ${String(e)}`);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   return (
     <div className="ph-gallery">
-      {showRawCouplingNotice && <div className="ph-gallery-notice">Raw coupling enabled</div>}
+      {galleryNotice && (
+        <div className="ph-gallery-notice" key={galleryNotice.id}>
+          {galleryNotice.text}
+        </div>
+      )}
       <header className="ph-gallery-head">
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onBack} title="Back">
           <ArrowLeft className="h-4 w-4" />
@@ -590,6 +650,7 @@ export function Gallery({
               type="button"
               className={`ph-date-filter-button${selectedDay ? " ph-date-filter-button-on" : ""}`}
               onClick={() => {
+                setActionMenuOpen(false);
                 setBrowseMenuOpen(false);
                 setDateDrawerOpen(true);
                 if (selectedDay && selectedDayMonthKey) {
@@ -601,6 +662,49 @@ export function Gallery({
               <CalendarDays className="h-4 w-4" />
               <span>Date</span>
             </button>
+            <div className="ph-browse-menu-wrap" ref={actionMenuRef}>
+              <button
+                type="button"
+                className="ph-browse-menu-button"
+                onClick={() => {
+                  setBrowseMenuOpen(false);
+                  setActionMenuOpen((v) => !v);
+                }}
+                aria-haspopup="menu"
+                aria-expanded={actionMenuOpen}
+                title="More actions"
+              >
+                <Ellipsis className="h-4 w-4" />
+              </button>
+              {actionMenuOpen && (
+                <div className="ph-browse-menu" role="menu" aria-label="More actions">
+                  <button
+                    type="button"
+                    className="ph-browse-menu-item"
+                    onClick={() => runBulkAction("flags")}
+                    disabled={busyAction !== null}
+                  >
+                    Remove flags
+                  </button>
+                  <button
+                    type="button"
+                    className="ph-browse-menu-item"
+                    onClick={() => runBulkAction("stars")}
+                    disabled={busyAction !== null}
+                  >
+                    Remove stars
+                  </button>
+                  <button
+                    type="button"
+                    className="ph-browse-menu-item"
+                    onClick={() => runBulkAction("write")}
+                    disabled={busyAction !== null}
+                  >
+                    Write stars into EXIF
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </header>
@@ -782,6 +886,7 @@ export function Gallery({
           onIndex={setOpenIndex}
           onClose={closeLightbox}
           onRemoved={handleRemoved}
+          onEntryUpdated={handleEntryUpdated}
           actionPathsByPath={rawCoupling ? rawCouplingMeta.actionPathsByPath : {}}
         />
       )}
