@@ -780,6 +780,14 @@
   z-index: 1;
 }
 
+.ph-lb-slide-zoomed {
+  cursor: grab;
+}
+
+.ph-lb-slide-dragging {
+  cursor: grabbing;
+}
+
 /* Both the placeholder and the real photo fill the whole screen, edge to edge. */
 .ph-lb-img {
   position: absolute;
@@ -788,6 +796,10 @@
   height: 100%;
   object-fit: contain;
   display: block;
+  transform-origin: center center;
+  transition: transform 0.08s linear;
+  will-change: transform;
+  pointer-events: none;
 }
 
 /* The small thumbnail blown up to fill the screen while the original loads. */

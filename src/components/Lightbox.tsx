@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -282,7 +282,16 @@ export function Lightbox({
   // "Browse…" — pick any folder via the native dialog, then send there.
   async function browseAndSend(mode: SendMode) {
     const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") void sendTo(selected, mode);
+    if (typeof selected !== "string") return;
+    try {
+      const cfg = await invoke<Config>("add_target_directory", { dir: selected });
+      setTargets(cfg.targetDirectories);
+      const idx = cfg.targetDirectories.findIndex((d) => d === selected);
+      if (idx >= 0) setMenuIndex(idx);
+    } catch {
+      // If persisting the target fails, still allow this one-off send.
+    }
+    void sendTo(selected, mode);
   }
 
   function confirmSelection(mode: SendMode) {
@@ -659,20 +668,167 @@ function Slide({
   nonce: number;
   overlay: ExifOverlay | null;
 }) {
+  const MIN_ZOOM = 1;
+  const MAX_ZOOM = 8;
+  const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+  const GESTURE_ZOOM_SENSITIVITY = 0.015;
+
   const [fullLoaded, setFullLoaded] = useState(false);
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragState, setDragState] = useState<{
+    id: number;
+    startX: number;
+    startY: number;
+    startOffsetX: number;
+    startOffsetY: number;
+  } | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const thumbSrc = `${thumbUrl(entry, 256)}&r=${nonce}`;
   const fullSrc = entry.raw ? `${thumbUrl(entry, 2048)}&r=${nonce}` : `${origUrl(entry)}?r=${nonce}`;
+
+  function clampScale(next: number) {
+    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+  }
+
+  function panBounds(nextScale: number) {
+    const el = containerRef.current;
+    if (!el || nextScale <= 1) return { x: 0, y: 0 };
+    const x = ((nextScale - 1) * el.clientWidth) / 2;
+    const y = ((nextScale - 1) * el.clientHeight) / 2;
+    return { x, y };
+  }
+
+  function clampOffset(nextOffset: { x: number; y: number }, nextScale: number) {
+    const bounds = panBounds(nextScale);
+    return {
+      x: Math.min(bounds.x, Math.max(-bounds.x, nextOffset.x)),
+      y: Math.min(bounds.y, Math.max(-bounds.y, nextOffset.y)),
+    };
+  }
+
+  function applyScale(nextScale: number) {
+    const clampedScale = clampScale(nextScale);
+    setScale(clampedScale);
+    setOffset((prev) => clampOffset(clampedScale <= 1 ? { x: 0, y: 0 } : prev, clampedScale));
+  }
+
+  function zoomBy(delta: number) {
+    if (!active) return;
+    applyScale(scale * (1 + delta));
+  }
+
   useEffect(() => {
     setFullLoaded(false);
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    setDragState(null);
   }, [entry.path, nonce]);
+
+  useEffect(() => {
+    if (active) return;
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    setDragState(null);
+  }, [active]);
+
+  useEffect(() => {
+    const onResize = () => setOffset((prev) => clampOffset(prev, scale));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [scale]);
+
+  useEffect(() => {
+    if (!active) return;
+    const node = containerRef.current;
+    if (!node) return;
+
+    type GestureEventLike = Event & { scale?: number };
+
+    const onGestureStart = (ev: Event) => {
+      ev.preventDefault();
+    };
+    const onGestureChange = (ev: Event) => {
+      const e = ev as GestureEventLike;
+      if (typeof e.scale !== "number") return;
+      ev.preventDefault();
+      const delta = (e.scale - 1) * GESTURE_ZOOM_SENSITIVITY;
+      if (delta !== 0) zoomBy(delta);
+    };
+    const onGestureEnd = (ev: Event) => {
+      ev.preventDefault();
+    };
+
+    node.addEventListener("gesturestart", onGestureStart, { passive: false });
+    node.addEventListener("gesturechange", onGestureChange, { passive: false });
+    node.addEventListener("gestureend", onGestureEnd, { passive: false });
+    return () => {
+      node.removeEventListener("gesturestart", onGestureStart);
+      node.removeEventListener("gesturechange", onGestureChange);
+      node.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, [active, scale]);
+
+  const zoomed = scale > 1.01;
+  const dragging = dragState !== null;
+
   return (
-    <div className={`ph-lb-slide${active ? " ph-lb-slide-active" : ""}`} aria-hidden={!active}>
+    <div
+      ref={containerRef}
+      className={`ph-lb-slide${active ? " ph-lb-slide-active" : ""}${zoomed ? " ph-lb-slide-zoomed" : ""}${dragging ? " ph-lb-slide-dragging" : ""}`}
+      aria-hidden={!active}
+      onWheel={(e) => {
+        if (!active) return;
+        e.preventDefault();
+        const delta = -e.deltaY * WHEEL_ZOOM_SENSITIVITY;
+        if (delta !== 0) zoomBy(delta);
+      }}
+      onDoubleClick={() => {
+        if (!active) return;
+        if (zoomed) {
+          setScale(1);
+          setOffset({ x: 0, y: 0 });
+        } else {
+          setScale(2);
+        }
+      }}
+      onPointerDown={(e) => {
+        if (!active || !zoomed || e.button !== 0) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setDragState({
+          id: e.pointerId,
+          startX: e.clientX,
+          startY: e.clientY,
+          startOffsetX: offset.x,
+          startOffsetY: offset.y,
+        });
+      }}
+      onPointerMove={(e) => {
+        if (!dragState || dragState.id !== e.pointerId) return;
+        const dx = e.clientX - dragState.startX;
+        const dy = e.clientY - dragState.startY;
+        setOffset(clampOffset({ x: dragState.startOffsetX + dx, y: dragState.startOffsetY + dy }, scale));
+      }}
+      onPointerUp={(e) => {
+        if (!dragState || dragState.id !== e.pointerId) return;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        setDragState(null);
+      }}
+      onPointerCancel={(e) => {
+        if (!dragState || dragState.id !== e.pointerId) return;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        setDragState(null);
+      }}
+      style={{ touchAction: "none" }}
+    >
       {/* Instant, stretched placeholder (cached grid thumbnail). */}
       <img
         src={thumbSrc}
         alt=""
         aria-hidden
         className="ph-lb-img ph-lb-placeholder"
+        style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
         draggable={false}
       />
       {/* The real, full-resolution photo — fades in once decoded. */}
@@ -680,7 +836,10 @@ function Slide({
         src={fullSrc}
         alt={entry.name}
         className="ph-lb-img ph-lb-full"
-        style={{ opacity: fullLoaded ? 1 : 0 }}
+        style={{
+          opacity: fullLoaded ? 1 : 0,
+          transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+        }}
         draggable={false}
         onLoad={() => setFullLoaded(true)}
       />
