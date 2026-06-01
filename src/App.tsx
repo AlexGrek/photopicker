@@ -29,7 +29,27 @@ export default function App() {
   const [view, setView] = useState<View>({ kind: "menu" });
 
   useEffect(() => {
-    invoke<Config>("get_config").then((cfg) => setRecentDirs(cfg.recentDirectories));
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    let theme: Config["theme"] = "system";
+    const applyTheme = () => {
+      const shouldUseDark = theme === "dark" || (theme === "system" && media.matches);
+      document.documentElement.classList.toggle("dark", shouldUseDark);
+    };
+    const onSystemThemeChange = () => {
+      if (theme === "system") applyTheme();
+    };
+
+    media.addEventListener("change", onSystemThemeChange);
+
+    void invoke<Config>("get_config").then((cfg) => {
+      setRecentDirs(cfg.recentDirectories);
+      theme = cfg.theme;
+      applyTheme();
+    });
+
+    return () => {
+      media.removeEventListener("change", onSystemThemeChange);
+    };
   }, []);
 
   // Handle photos/folders the OS hands us via a file association or "Open with":

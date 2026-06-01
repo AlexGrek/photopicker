@@ -73,6 +73,7 @@ export function Lightbox({
   const [menuIndex, setMenuIndex] = useState(0); // highlighted destination in the chooser
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [lightboxInFullscreen, setLightboxInFullscreen] = useState<boolean | null>(null);
 
   const mark = marks[entry.name] ?? EMPTY_MARK;
   const showToolbar = toolbarShown || menuMode !== null || confirmingDelete;
@@ -86,7 +87,11 @@ export function Lightbox({
       () => alive && setMarks({}),
     );
     invoke<Config>("get_config").then(
-      (cfg) => alive && setTargets(cfg.targetDirectories),
+      (cfg) => {
+        if (!alive) return;
+        setTargets(cfg.targetDirectories);
+        setLightboxInFullscreen(cfg.lightboxInFullscreen);
+      },
       () => {},
     );
     return () => {
@@ -97,22 +102,26 @@ export function Lightbox({
   // Drive the OS window into fullscreen for as long as the lightbox is open,
   // restoring the previous state on close (unless the user was already fullscreen).
   useEffect(() => {
+    if (lightboxInFullscreen !== true) return;
     const win = getCurrentWindow();
-    let wasFullscreen = false;
     let cancelled = false;
+    let enteredFullscreen = false;
     (async () => {
       try {
-        wasFullscreen = await win.isFullscreen();
-        if (!cancelled) await win.setFullscreen(true);
+        const wasFullscreen = await win.isFullscreen();
+        if (!cancelled && !wasFullscreen) {
+          await win.setFullscreen(true);
+          enteredFullscreen = true;
+        }
       } catch {
         /* fullscreen not permitted — the overlay still fills the window */
       }
     })();
     return () => {
       cancelled = true;
-      if (!wasFullscreen) void win.setFullscreen(false).catch(() => {});
+      if (enteredFullscreen) void win.setFullscreen(false).catch(() => {});
     };
-  }, []);
+  }, [lightboxInFullscreen]);
 
   // Reveal each edge's controls only while the cursor is near that edge.
   useEffect(() => {

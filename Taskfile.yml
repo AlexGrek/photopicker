@@ -1,0 +1,7 @@
+version: "3"
+
+tasks:
+  dev:
+    desc: Run the app in Tauri development mode
+    cmds:
+      - npm run tauri dev

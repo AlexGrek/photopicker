@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+fn default_lightbox_in_fullscreen() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -16,6 +20,9 @@ pub struct Config {
     /// User-curated destination directories that selected photos can be sent to.
     #[serde(default)]
     pub target_directories: Vec<String>,
+    /// Whether opening the lightbox should drive the app window in/out of fullscreen.
+    #[serde(default = "default_lightbox_in_fullscreen")]
+    pub lightbox_in_fullscreen: bool,
 }
 
 impl Default for Config {
@@ -26,6 +33,7 @@ impl Default for Config {
             max_recent_directories: 10,
             recent_directories: Vec::new(),
             target_directories: Vec::new(),
+            lightbox_in_fullscreen: default_lightbox_in_fullscreen(),
         }
     }
 }

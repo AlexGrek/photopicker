@@ -5,4 +5,5 @@ export interface Config {
   maxRecentDirectories: number;
   recentDirectories: string[];
   targetDirectories: string[];
+  lightboxInFullscreen: boolean;
 }

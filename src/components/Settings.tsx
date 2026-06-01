@@ -10,10 +10,15 @@ import { shortenPath } from "@/lib/utils";
 
 export function Settings({ onBack }: { onBack: () => void }) {
   const [targetDirs, setTargetDirs] = useState<string[]>([]);
+  const [lightboxInFullscreen, setLightboxInFullscreen] = useState(true);
   const [picking, setPicking] = useState(false);
+  const [savingFullscreenPref, setSavingFullscreenPref] = useState(false);
 
   useEffect(() => {
-    invoke<Config>("get_config").then((cfg) => setTargetDirs(cfg.targetDirectories));
+    invoke<Config>("get_config").then((cfg) => {
+      setTargetDirs(cfg.targetDirectories);
+      setLightboxInFullscreen(cfg.lightboxInFullscreen);
+    });
   }, []);
 
   async function addTarget() {
@@ -24,6 +29,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
       if (typeof selected === "string") {
         const cfg = await invoke<Config>("add_target_directory", { dir: selected });
         setTargetDirs(cfg.targetDirectories);
+        setLightboxInFullscreen(cfg.lightboxInFullscreen);
       }
     } finally {
       setPicking(false);
@@ -33,6 +39,23 @@ export function Settings({ onBack }: { onBack: () => void }) {
   async function removeTarget(dir: string) {
     const cfg = await invoke<Config>("remove_target_directory", { dir });
     setTargetDirs(cfg.targetDirectories);
+    setLightboxInFullscreen(cfg.lightboxInFullscreen);
+  }
+
+  async function toggleLightboxFullscreen(next: boolean) {
+    if (savingFullscreenPref) return;
+    setSavingFullscreenPref(true);
+    setLightboxInFullscreen(next);
+    try {
+      const cfg = await invoke<Config>("get_config");
+      const updated: Config = { ...cfg, lightboxInFullscreen: next };
+      await invoke("save_config", { config: updated });
+    } catch {
+      // Revert the UI toggle on save failure so it matches disk state.
+      setLightboxInFullscreen((prev) => !prev);
+    } finally {
+      setSavingFullscreenPref(false);
+    }
   }
 
   return (
@@ -44,6 +67,31 @@ export function Settings({ onBack }: { onBack: () => void }) {
           </Button>
           <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
         </div>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
+              Viewer
+            </CardTitle>
+          </CardHeader>
+
+          <Separator />
+
+          <CardContent className="pt-4">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-foreground"
+                checked={lightboxInFullscreen}
+                disabled={savingFullscreenPref}
+                onChange={(e) => toggleLightboxFullscreen(e.target.checked)}
+              />
+              <span className="text-sm leading-5">
+                Enter fullscreen when opening the lightbox
+              </span>
+            </label>
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
