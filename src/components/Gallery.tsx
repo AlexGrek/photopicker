@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { VirtuosoMasonry, type ItemContent } from "@virtuoso.dev/masonry";
 import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, Flag, ImageOff, SlidersHorizontal, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { listImages, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
+import { type Config } from "@/lib/config";
 import { EMPTY_MARK, getMarks, type Mark } from "@/lib/marks";
 import { PhotoTile, type TileContext } from "./PhotoTile";
 import { Lightbox } from "./Lightbox";
@@ -28,12 +30,14 @@ function useColumnCount(): number {
 
 const TileItem = PhotoTile as ItemContent<ImageEntry, TileContext>;
 type ViewMode = "masonry" | "grid" | "list";
-type SortMode = "nameAsc" | "nameDesc" | "createdDesc" | "createdAsc";
+type SortMode = "nameAsc" | "nameDesc" | "createdDesc" | "createdAsc" | "shotDesc" | "shotAsc";
 const SORT_LABEL: Record<SortMode, string> = {
   nameAsc: "Name A-Z",
   nameDesc: "Name Z-A",
   createdDesc: "Created newest",
   createdAsc: "Created oldest",
+  shotDesc: "Shot date newest (slow)",
+  shotAsc: "Shot date oldest (slow)",
 };
 const CREATED_DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
@@ -90,6 +94,43 @@ function timestampForFilter(entry: ImageEntry): number | null {
   return entry.created ?? entry.modified ?? null;
 }
 
+function stemKey(name: string): string {
+  return name.replace(/\.[^.]+$/, "").toLocaleLowerCase();
+}
+
+function isJpegName(name: string): boolean {
+  return /\.(jpg|jpeg|jpe|jfif)$/i.test(name);
+}
+
+function hasJpegRawPair(items: ImageEntry[]): boolean {
+  const groups = new Map<string, { raw: boolean; jpeg: boolean }>();
+  for (const item of items) {
+    const key = stemKey(item.name);
+    const entry = groups.get(key) ?? { raw: false, jpeg: false };
+    if (item.raw) entry.raw = true;
+    if (isJpegName(item.name)) entry.jpeg = true;
+    groups.set(key, entry);
+    if (entry.raw && entry.jpeg) return true;
+  }
+  return false;
+}
+
+// Heuristic requested by product: sample 2 files from the start and 4 from the
+// end; if at least one JPEG/RAW pair exists there, auto-enable raw coupling.
+function detectRawCouplingBySample(items: ImageEntry[]): boolean {
+  if (items.length === 0) return false;
+  const sampled: ImageEntry[] = [];
+  const seen = new Set<string>();
+  const pushUnique = (entry: ImageEntry | undefined) => {
+    if (!entry || seen.has(entry.path)) return;
+    seen.add(entry.path);
+    sampled.push(entry);
+  };
+  for (const entry of items.slice(0, 2)) pushUnique(entry);
+  for (const entry of items.slice(Math.max(0, items.length - 4))) pushUnique(entry);
+  return hasJpegRawPair(sampled);
+}
+
 /** Stable, varied aspect ratios so the loading skeleton reads as a masonry, not a grid. */
 const SKELETON_ASPECTS = [1.3, 0.74, 1, 1.5, 0.8, 1.2, 0.66, 1.05, 1.4, 0.9, 1.15, 0.7];
 
@@ -139,6 +180,11 @@ export function Gallery({
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("masonry");
   const [sortMode, setSortMode] = useState<SortMode>("nameAsc");
+  const [rawCoupling, setRawCoupling] = useState(false);
+  const [showRawCouplingNotice, setShowRawCouplingNotice] = useState(false);
+  const [enableRawCouplingDetection, setEnableRawCouplingDetection] = useState(true);
+  const [shotDateByPath, setShotDateByPath] = useState<Record<string, number>>({});
+  const [shotDateKeyLoaded, setShotDateKeyLoaded] = useState<string | null>(null);
   const [browseMenuOpen, setBrowseMenuOpen] = useState(false);
   const [dateDrawerOpen, setDateDrawerOpen] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
@@ -159,10 +205,21 @@ export function Gallery({
     setSelectedDay(null);
     setCalendarMonth(monthStart(new Date()));
     setMarks({});
+    setShotDateByPath({});
+    setShotDateKeyLoaded(null);
     openedFileRef.current = undefined;
-    listImages(dir).then(
-      (list) => {
-        if (alive) setEntries(list);
+    Promise.all([
+      listImages(dir),
+      invoke<Config>("get_config").catch(() => ({ enableRawCouplingDetection: true } as Config)),
+    ]).then(
+      ([list, cfg]) => {
+        if (!alive) return;
+        const detectionEnabled = cfg.enableRawCouplingDetection;
+        setEnableRawCouplingDetection(detectionEnabled);
+        setEntries(list);
+        const autoEnabled = detectionEnabled && detectRawCouplingBySample(list);
+        setRawCoupling(autoEnabled);
+        setShowRawCouplingNotice(autoEnabled);
       },
       (e) => {
         if (alive) setError(String(e));
@@ -177,16 +234,75 @@ export function Gallery({
     };
   }, [dir]);
 
+  useEffect(() => {
+    if (!showRawCouplingNotice) return;
+    const t = setTimeout(() => setShowRawCouplingNotice(false), 2600);
+    return () => clearTimeout(t);
+  }, [showRawCouplingNotice]);
+
+  const shotSort = sortMode === "shotDesc" || sortMode === "shotAsc";
+  const shotDateLoadKey = `${dir}:${rawCoupling ? "coupled" : "plain"}`;
+  useEffect(() => {
+    if (!shotSort) return;
+    if (shotDateKeyLoaded === shotDateLoadKey) return;
+    let alive = true;
+    invoke<Record<string, number>>("list_shot_dates", { dir, rawCoupling }).then(
+      (map) => {
+        if (!alive) return;
+        setShotDateByPath(map);
+        setShotDateKeyLoaded(shotDateLoadKey);
+      },
+      () => {
+        if (!alive) return;
+        setShotDateByPath({});
+        setShotDateKeyLoaded(shotDateLoadKey);
+      },
+    );
+    return () => {
+      alive = false;
+    };
+  }, [dir, rawCoupling, shotSort, shotDateKeyLoaded, shotDateLoadKey]);
+
   const filtersActive = minRating > 0 || flaggedOnly || selectedDay !== null;
 
-  const byMarkFilter = useMemo<ImageEntry[]>(() => {
+  const rawCouplingMeta = useMemo(() => {
+    const hiddenRawPaths = new Set<string>();
+    const actionPathsByPath: Record<string, string[]> = {};
+    if (!entries || entries.length === 0) return { hiddenRawPaths, actionPathsByPath };
+
+    const groups = new Map<string, ImageEntry[]>();
+    for (const entry of entries) {
+      const key = stemKey(entry.name);
+      const group = groups.get(key);
+      if (group) group.push(entry);
+      else groups.set(key, [entry]);
+    }
+
+    for (const group of groups.values()) {
+      const raws = group.filter((e) => e.raw);
+      const jpegs = group.filter((e) => isJpegName(e.name));
+      if (raws.length === 0 || jpegs.length === 0) continue;
+      for (const raw of raws) hiddenRawPaths.add(raw.path);
+      const coupledPaths = group.map((e) => e.path);
+      for (const jpeg of jpegs) actionPathsByPath[jpeg.path] = coupledPaths;
+    }
+
+    return { hiddenRawPaths, actionPathsByPath };
+  }, [entries]);
+
+  const baseEntries = useMemo(() => {
     if (!entries) return [];
-    return entries.filter((e) => {
+    if (!rawCoupling) return entries;
+    return entries.filter((e) => !rawCouplingMeta.hiddenRawPaths.has(e.path));
+  }, [entries, rawCoupling, rawCouplingMeta]);
+
+  const byMarkFilter = useMemo<ImageEntry[]>(() => {
+    return baseEntries.filter((e) => {
       const m = marks[e.name] ?? EMPTY_MARK;
       if (flaggedOnly && !m.flag) return false;
       return m.rating >= minRating;
     });
-  }, [entries, marks, minRating, flaggedOnly]);
+  }, [baseEntries, marks, minRating, flaggedOnly]);
 
   const dateBuckets = useMemo(() => {
     const buckets = new Map<string, { count: number; preview: ImageEntry }>();
@@ -221,6 +337,14 @@ export function Gallery({
     if (filtered.length <= 1) return filtered;
     const sorted = [...filtered];
     sorted.sort((a, b) => {
+      if (sortMode === "shotDesc" || sortMode === "shotAsc") {
+        const aShot = shotDateByPath[a.path] ?? -1;
+        const bShot = shotDateByPath[b.path] ?? -1;
+        if (sortMode === "shotDesc") {
+          return bShot - aShot || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+        }
+        return aShot - bShot || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      }
       if (sortMode === "nameAsc") return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
       if (sortMode === "nameDesc") return b.name.localeCompare(a.name, undefined, { sensitivity: "base" });
       const aCreated = a.created ?? -1;
@@ -231,14 +355,14 @@ export function Gallery({
       return aCreated - bCreated || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
     });
     return sorted;
-  }, [byMarkFilter, selectedDay, sortMode]);
+  }, [byMarkFilter, selectedDay, sortMode, shotDateByPath]);
 
   // Filtering can drastically shrink the list; with window-scroll virtualization,
   // keeping an old deep scroll offset may leave the viewport beyond the new data.
   // Reset to top whenever the filter state changes.
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  }, [minRating, flaggedOnly, selectedDay, sortMode, viewMode]);
+  }, [minRating, flaggedOnly, selectedDay, sortMode, viewMode, rawCoupling]);
 
   useEffect(() => {
     if (!browseMenuOpen) return;
@@ -282,8 +406,16 @@ export function Gallery({
     }
     openedFileRef.current = initialFile;
     const i = visible.findIndex((e) => e.name === initialFile);
-    if (i >= 0) setOpenIndex(i);
-  }, [initialFile, entries, visible, minRating, flaggedOnly, selectedDay]);
+    if (i >= 0) {
+      setOpenIndex(i);
+      return;
+    }
+    if (rawCoupling) {
+      const key = stemKey(initialFile);
+      const paired = visible.findIndex((e) => stemKey(e.name) === key);
+      if (paired >= 0) setOpenIndex(paired);
+    }
+  }, [initialFile, entries, visible, minRating, flaggedOnly, selectedDay, rawCoupling]);
 
   const context = useMemo<TileContext>(
     () => ({ onOpen: (i) => setOpenIndex(i), mode: viewMode === "grid" ? "grid" : "masonry" }),
@@ -299,22 +431,23 @@ export function Gallery({
 
   // A photo left this folder (moved or deleted): drop its tile and keep the lightbox
   // on whatever slides into its place (closing if nothing visible is left).
-  function handleRemoved(path: string) {
+  function handleRemoved(paths: string[]) {
+    const removed = new Set(paths);
     const full = entriesRef.current;
     if (full) {
-      const remaining = full.filter((e) => e.path !== path);
+      const remaining = full.filter((e) => !removed.has(e.path));
       entriesRef.current = remaining;
       setEntries(remaining);
     }
     const vis = visibleRef.current;
-    const removedIndex = vis.findIndex((e) => e.path === path);
-    if (removedIndex === -1) return;
-    const remainingVisible = vis.length - 1;
     setOpenIndex((idx) => {
       if (idx === null) return idx;
-      if (remainingVisible <= 0) return null;
-      const shifted = removedIndex < idx ? idx - 1 : idx;
-      return Math.min(shifted, remainingVisible - 1);
+      const current = vis[idx];
+      const remainingVisible = vis.filter((e) => !removed.has(e.path));
+      if (remainingVisible.length === 0) return null;
+      if (current && removed.has(current.path)) return Math.min(idx, remainingVisible.length - 1);
+      const removedBefore = vis.slice(0, idx).reduce((n, e) => n + (removed.has(e.path) ? 1 : 0), 0);
+      return Math.max(0, idx - removedBefore);
     });
   }
 
@@ -340,6 +473,7 @@ export function Gallery({
 
   return (
     <div className="ph-gallery">
+      {showRawCouplingNotice && <div className="ph-gallery-notice">Raw coupling enabled</div>}
       <header className="ph-gallery-head">
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onBack} title="Back">
           <ArrowLeft className="h-4 w-4" />
@@ -351,8 +485,8 @@ export function Gallery({
           {entries ? (
             <span className="ph-gallery-count">
               {filtersActive
-                ? `${visible.length} of ${entries.length}`
-                : `${entries.length} photo${entries.length === 1 ? "" : "s"}`}
+                ? `${visible.length} of ${baseEntries.length}`
+                : `${baseEntries.length} photo${baseEntries.length === 1 ? "" : "s"}`}
             </span>
           ) : error ? null : (
             <span className="ph-gallery-count ph-gallery-loading">Reading folder…</span>
@@ -417,6 +551,22 @@ export function Gallery({
                     </button>
                   ))}
                   <div className="ph-browse-menu-sep" />
+                  <div className="ph-browse-menu-title">Raw coupling</div>
+                  <button
+                    type="button"
+                    className={`ph-browse-menu-item${rawCoupling ? " ph-browse-menu-item-on" : ""}`}
+                    onClick={() => setRawCoupling((v) => !v)}
+                    role="menuitemcheckbox"
+                    aria-checked={rawCoupling}
+                    title={
+                      enableRawCouplingDetection
+                        ? "Manual toggle (auto-detection is enabled in Settings)"
+                        : "Manual toggle (auto-detection disabled in Settings)"
+                    }
+                  >
+                    {rawCoupling ? "On (JPEG shown, actions on RAW+JPEG)" : "Off"}
+                  </button>
+                  <div className="ph-browse-menu-sep" />
                   <div className="ph-browse-menu-title">Sort by</div>
                   {(Object.keys(SORT_LABEL) as SortMode[]).map((mode) => (
                     <button
@@ -465,7 +615,7 @@ export function Gallery({
       ) : entries.length === 0 ? (
         <div className="ph-gallery-message">
           <ImageOff className="h-5 w-5" />
-          <span>No JPEG photos in this folder.</span>
+          <span>No supported photos in this folder.</span>
         </div>
       ) : visible.length === 0 ? (
         <div className="ph-gallery-message">
@@ -500,7 +650,7 @@ export function Gallery({
         </ul>
       ) : (
         <VirtuosoMasonry
-          key={`${dir}:${viewMode}:${sortMode}:${minRating}:${flaggedOnly ? "flagged" : "all"}`}
+          key={`${dir}:${viewMode}:${sortMode}:${rawCoupling ? "coupled" : "plain"}:${minRating}:${flaggedOnly ? "flagged" : "all"}`}
           useWindowScroll
           columnCount={columnCount}
           data={visible}
@@ -632,6 +782,7 @@ export function Gallery({
           onIndex={setOpenIndex}
           onClose={closeLightbox}
           onRemoved={handleRemoved}
+          actionPathsByPath={rawCoupling ? rawCouplingMeta.actionPathsByPath : {}}
         />
       )}
     </div>

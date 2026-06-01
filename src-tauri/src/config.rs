@@ -6,6 +6,10 @@ fn default_lightbox_in_fullscreen() -> bool {
     true
 }
 
+fn default_enable_raw_coupling_detection() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -23,6 +27,9 @@ pub struct Config {
     /// Whether opening the lightbox should drive the app window in/out of fullscreen.
     #[serde(default = "default_lightbox_in_fullscreen")]
     pub lightbox_in_fullscreen: bool,
+    /// Whether RAW coupling auto-detection should run when opening a gallery.
+    #[serde(default = "default_enable_raw_coupling_detection")]
+    pub enable_raw_coupling_detection: bool,
 }
 
 impl Default for Config {
@@ -34,6 +41,7 @@ impl Default for Config {
             recent_directories: Vec::new(),
             target_directories: Vec::new(),
             lightbox_in_fullscreen: default_lightbox_in_fullscreen(),
+            enable_raw_coupling_detection: default_enable_raw_coupling_detection(),
         }
     }
 }

@@ -18,7 +18,8 @@
 
 use std::fs;
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use jpeg_encoder::{ColorType, Encoder};
 use serde::Serialize;
@@ -53,15 +54,27 @@ pub struct ImageEntry {
     pub modified: Option<u64>,
     /// Created time in milliseconds since the Unix epoch, if available.
     pub created: Option<u64>,
+    /// Whether this file is a RAW photo (currently preview-only via embedded JPEG).
+    pub raw: bool,
 }
 
-/// Lists the JPEG files directly inside `dir`, sorted case-insensitively by name.
+#[derive(Clone)]
+struct ShotDateCandidate {
+    path: String,
+    stem: String,
+    raw: bool,
+    jpeg: bool,
+}
+
+/// Lists supported image files directly inside `dir`, sorted case-insensitively by name.
 pub fn list_images(dir: &str) -> Result<Vec<ImageEntry>, String> {
     let read = fs::read_dir(dir).map_err(|e| format!("Cannot read {dir}: {e}"))?;
     let mut out = Vec::new();
     for entry in read.flatten() {
         let path = entry.path();
-        if !is_jpeg_path(&path) {
+        let ext = file_ext(&path);
+        let is_raw = is_raw_ext(ext);
+        if !is_jpeg_ext(ext) && !is_raw {
             continue;
         }
         let meta = entry.metadata().ok();
@@ -84,24 +97,88 @@ pub fn list_images(dir: &str) -> Result<Vec<ImageEntry>, String> {
             size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
             modified,
             created,
+            raw: is_raw,
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }
 
-fn is_jpeg_path(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
-        Some("jpg" | "jpeg" | "jpe" | "jfif")
-    )
+fn file_ext(path: &Path) -> Option<&str> {
+    path.extension().and_then(|e| e.to_str())
+}
+
+fn is_jpeg_ext(ext: Option<&str>) -> bool {
+    matches!(ext.map(str::to_ascii_lowercase).as_deref(), Some("jpg" | "jpeg" | "jpe" | "jfif"))
+}
+
+fn is_raw_ext(ext: Option<&str>) -> bool {
+    matches!(ext.map(str::to_ascii_lowercase).as_deref(), Some("arw" | "raf"))
+}
+
+fn is_raw_path(path: &Path) -> bool {
+    is_raw_ext(file_ext(path))
+}
+
+pub fn list_shot_dates(dir: &str, raw_coupling: bool) -> Result<HashMap<String, u64>, String> {
+    let read = fs::read_dir(dir).map_err(|e| format!("Cannot read {dir}: {e}"))?;
+    let mut candidates = Vec::<ShotDateCandidate>::new();
+    for entry in read.flatten() {
+        let path = entry.path();
+        let ext = file_ext(&path);
+        let raw = is_raw_ext(ext);
+        let jpeg = is_jpeg_ext(ext);
+        if !raw && !jpeg {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        candidates.push(ShotDateCandidate {
+            path: path.to_string_lossy().into_owned(),
+            stem,
+            raw,
+            jpeg,
+        });
+    }
+
+    let skip_raw_stems = if raw_coupling {
+        let mut raw = HashSet::<String>::new();
+        let mut jpeg = HashSet::<String>::new();
+        for c in &candidates {
+            if c.raw {
+                raw.insert(c.stem.clone());
+            }
+            if c.jpeg {
+                jpeg.insert(c.stem.clone());
+            }
+        }
+        raw.intersection(&jpeg).cloned().collect::<HashSet<String>>()
+    } else {
+        HashSet::new()
+    };
+
+    let mut out = HashMap::<String, u64>::new();
+    for c in candidates {
+        if raw_coupling && c.raw && skip_raw_stems.contains(&c.stem) {
+            continue;
+        }
+        if let Some(ts) = read_shot_date_key(&c.path, c.raw) {
+            out.insert(c.path, ts);
+        }
+    }
+    Ok(out)
 }
 
 /// Renders an upright thumbnail JPEG for `path`, fitting its longest edge to
 /// `max_edge` pixels. Returns the encoded JPEG bytes ready to serve to the webview.
 pub fn render_thumbnail(path: &str, max_edge: u32) -> Result<Vec<u8>, String> {
+    let path_obj = PathBuf::from(path);
     let total_len = fs::metadata(path).map_err(|e| e.to_string())?.len();
     let prefix = read_prefix(path, PREFIX_CAP.min(total_len.max(1)))?;
+    let raw_file = is_raw_path(&path_obj);
 
     // Orientation + the embedded thumbnail both live at the front of the file.
     let meta = read_exif(&prefix);
@@ -116,6 +193,10 @@ pub fn render_thumbnail(path: &str, max_edge: u32) -> Result<Vec<u8>, String> {
     let (mut rgb, mut w, mut h) = match from_exif {
         Some(decoded) => decoded,
         None => {
+            if raw_file {
+                // RAW files are preview-only for now. We never decode full RAW data here.
+                return Err("RAW embedded preview not available".into());
+            }
             // No usable embedded thumbnail (or a large preview was requested): pay
             // for a full decode, reading the whole file only now.
             let full = read_whole_if_needed(path, &prefix, total_len)?;
@@ -149,13 +230,21 @@ struct ExifMeta {
     orientation: u16,
     /// Raw bytes of the embedded thumbnail JPEG, if present.
     thumbnail: Option<Vec<u8>>,
+    /// EXIF DateTimeOriginal-like sortable timestamp key (YYYYMMDDhhmmss).
+    shot_date_key: Option<u64>,
 }
 
 fn read_exif(bytes: &[u8]) -> ExifMeta {
     let mut cursor = Cursor::new(bytes);
     let exif = match exif::Reader::new().read_from_container(&mut cursor) {
         Ok(e) => e,
-        Err(_) => return ExifMeta { orientation: 1, thumbnail: None },
+        Err(_) => {
+            return ExifMeta {
+                orientation: 1,
+                thumbnail: None,
+                shot_date_key: None,
+            }
+        }
     };
 
     let orientation = exif
@@ -184,7 +273,54 @@ fn read_exif(bytes: &[u8]) -> ExifMeta {
         }
     })();
 
-    ExifMeta { orientation, thumbnail }
+    let shot_date_key = read_exif_shot_date_key(&exif);
+
+    ExifMeta {
+        orientation,
+        thumbnail,
+        shot_date_key,
+    }
+}
+
+fn read_exif_shot_date_key(exif: &exif::Exif) -> Option<u64> {
+    let tags = [exif::Tag::DateTimeOriginal, exif::Tag::DateTimeDigitized, exif::Tag::DateTime];
+    for tag in tags {
+        let field = exif.get_field(tag, exif::In::PRIMARY)?;
+        let exif::Value::Ascii(values) = &field.value else {
+            continue;
+        };
+        let raw = values.first()?;
+        let text = std::str::from_utf8(raw).ok()?.trim_matches(char::from(0)).trim();
+        if let Some(key) = parse_exif_datetime_key(text) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+fn parse_exif_datetime_key(text: &str) -> Option<u64> {
+    // Expected EXIF form: "YYYY:MM:DD HH:MM:SS". Keep only digits to build
+    // a sortable key: YYYYMMDDhhmmss.
+    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 14 {
+        return None;
+    }
+    digits[..14].parse::<u64>().ok()
+}
+
+fn read_shot_date_key(path: &str, raw_file: bool) -> Option<u64> {
+    let total_len = fs::metadata(path).ok()?.len();
+    let prefix = read_prefix(path, PREFIX_CAP.min(total_len.max(1))).ok()?;
+    let exif = read_exif(&prefix);
+    if exif.shot_date_key.is_some() {
+        return exif.shot_date_key;
+    }
+    // RAW metadata can sit deeper in the file than JPEG metadata.
+    if raw_file || (prefix.len() as u64) < total_len {
+        let full = read_whole_if_needed(path, &prefix, total_len).ok()?;
+        return read_exif(&full).shot_date_key;
+    }
+    None
 }
 
 /// Fully decodes a JPEG to packed RGB (3 bytes/px).

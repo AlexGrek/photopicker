@@ -11,13 +11,16 @@ import { shortenPath } from "@/lib/utils";
 export function Settings({ onBack }: { onBack: () => void }) {
   const [targetDirs, setTargetDirs] = useState<string[]>([]);
   const [lightboxInFullscreen, setLightboxInFullscreen] = useState(true);
+  const [enableRawCouplingDetection, setEnableRawCouplingDetection] = useState(true);
   const [picking, setPicking] = useState(false);
   const [savingFullscreenPref, setSavingFullscreenPref] = useState(false);
+  const [savingRawCouplingPref, setSavingRawCouplingPref] = useState(false);
 
   useEffect(() => {
     invoke<Config>("get_config").then((cfg) => {
       setTargetDirs(cfg.targetDirectories);
       setLightboxInFullscreen(cfg.lightboxInFullscreen);
+      setEnableRawCouplingDetection(cfg.enableRawCouplingDetection);
     });
   }, []);
 
@@ -30,6 +33,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
         const cfg = await invoke<Config>("add_target_directory", { dir: selected });
         setTargetDirs(cfg.targetDirectories);
         setLightboxInFullscreen(cfg.lightboxInFullscreen);
+        setEnableRawCouplingDetection(cfg.enableRawCouplingDetection);
       }
     } finally {
       setPicking(false);
@@ -40,6 +44,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
     const cfg = await invoke<Config>("remove_target_directory", { dir });
     setTargetDirs(cfg.targetDirectories);
     setLightboxInFullscreen(cfg.lightboxInFullscreen);
+    setEnableRawCouplingDetection(cfg.enableRawCouplingDetection);
   }
 
   async function toggleLightboxFullscreen(next: boolean) {
@@ -55,6 +60,21 @@ export function Settings({ onBack }: { onBack: () => void }) {
       setLightboxInFullscreen((prev) => !prev);
     } finally {
       setSavingFullscreenPref(false);
+    }
+  }
+
+  async function toggleRawCouplingDetection(next: boolean) {
+    if (savingRawCouplingPref) return;
+    setSavingRawCouplingPref(true);
+    setEnableRawCouplingDetection(next);
+    try {
+      const cfg = await invoke<Config>("get_config");
+      const updated: Config = { ...cfg, enableRawCouplingDetection: next };
+      await invoke("save_config", { config: updated });
+    } catch {
+      setEnableRawCouplingDetection((prev) => !prev);
+    } finally {
+      setSavingRawCouplingPref(false);
     }
   }
 
@@ -88,6 +108,29 @@ export function Settings({ onBack }: { onBack: () => void }) {
               />
               <span className="text-sm leading-5">
                 Enter fullscreen when opening the lightbox
+              </span>
+            </label>
+            <label className="mt-3 flex items-start gap-3 opacity-60 cursor-not-allowed" title="Coming soon">
+              <input type="checkbox" className="mt-0.5 h-4 w-4 accent-foreground" checked={false} disabled />
+              <span className="text-sm leading-5">
+                Load full RAW
+                <span className="block text-xs text-muted-foreground">Coming soon (embedded previews only for now)</span>
+              </span>
+            </label>
+            <label className="mt-3 flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 accent-foreground"
+                checked={enableRawCouplingDetection}
+                disabled={savingRawCouplingPref}
+                onChange={(e) => toggleRawCouplingDetection(e.target.checked)}
+              />
+              <span className="text-sm leading-5">
+                Enable raw coupling detection
+                <span className="block text-xs text-muted-foreground">
+                  When a JPG and RAW share the same base name, the gallery shows only the JPG while copy, move, and
+                  delete actions affect both files.
+                </span>
               </span>
             </label>
           </CardContent>

@@ -101,6 +101,15 @@ async fn list_images(dir: String) -> Result<Vec<ImageEntry>, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// Reads EXIF shot dates for supported files in `dir` (slow path, on demand).
+/// Returns a map keyed by absolute file path.
+#[tauri::command]
+async fn list_shot_dates(dir: String, raw_coupling: bool) -> Result<HashMap<String, u64>, String> {
+    tauri::async_runtime::spawn_blocking(move || images::list_shot_dates(&dir, raw_coupling))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn get_config() -> Config {
     Config::load()
@@ -294,6 +303,9 @@ fn handle_orig_request(request: Request<Vec<u8>>, responder: UriSchemeResponder)
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Preload rawloader's camera database so RAW preview support is ready once
+    // we start reading embedded previews from ARW/RAF files.
+    rawloader::force_initialization();
     let thumb_sem = Arc::new(Semaphore::new(THUMB_CONCURRENCY));
     let marks_db = MarksDb::open().expect("failed to open marks database");
 
@@ -331,6 +343,7 @@ pub fn run() {
             move_to_target,
             delete_file,
             list_images,
+            list_shot_dates,
             take_pending_open,
         ])
         .build(tauri::generate_context!())

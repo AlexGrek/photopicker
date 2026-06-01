@@ -52,15 +52,18 @@ export function Lightbox({
   onIndex,
   onClose,
   onRemoved,
+  actionPathsByPath,
 }: {
   dir: string;
   entries: ImageEntry[];
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
-  /** Called with a photo's path after it leaves the directory (moved or deleted),
+  /** Called with photo paths after they leave the directory (moved or deleted),
    *  so the host can drop that tile from the grid. */
-  onRemoved: (path: string) => void;
+  onRemoved: (paths: string[]) => void;
+  /** Optional action override (e.g. RAW coupling) keyed by visible entry path. */
+  actionPathsByPath: Record<string, string[]>;
 }) {
   const entry = entries[index];
 
@@ -162,6 +165,7 @@ export function Lightbox({
   const hasNext = index < entries.length - 1;
   const goPrev = () => hasPrev && onIndex(index - 1);
   const goNext = () => hasNext && onIndex(index + 1);
+  const actionPathsFor = (e: ImageEntry) => actionPathsByPath[e.path] ?? [e.path];
 
   function applyMark(next: Mark) {
     setMarks((m) => ({ ...m, [entry.name]: next }));
@@ -174,18 +178,26 @@ export function Lightbox({
   async function sendTo(target: string, mode: SendMode) {
     setMenuMode(null);
     const acted = entry; // the photo at action time — frozen across the await
+    const actedPaths = actionPathsFor(acted);
     const dest = shortenPath(target);
-    setStatus(`${mode === "copy" ? "Copying" : "Moving"} to ${dest}…`);
+    setStatus(`${mode === "copy" ? "Copying" : "Moving"} ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}…`);
     try {
       if (mode === "copy") {
-        await copyToTarget(acted.path, target);
-        setStatus(`Copied to ${dest}`);
+        for (const path of actedPaths) {
+          await copyToTarget(path, target);
+        }
+        setStatus(`Copied ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}`);
       } else {
-        await moveToTarget(acted.path, target);
-        // The original left the folder: drop its (now-orphaned) mark and tile.
-        void setMark(dir, acted.name, EMPTY_MARK).catch(() => {});
-        onRemoved(acted.path);
-        setStatus(`Moved to ${dest}`);
+        for (const path of actedPaths) {
+          await moveToTarget(path, target);
+        }
+        // Moved files left the folder: drop their marks and tiles.
+        for (const path of actedPaths) {
+          const name = path.split(/[/\\]/).pop();
+          if (name) void setMark(dir, name, EMPTY_MARK).catch(() => {});
+        }
+        onRemoved(actedPaths);
+        setStatus(`Moved ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}`);
       }
     } catch (e) {
       setStatus(`${mode === "copy" ? "Copy" : "Move"} failed: ${String(e)}`);
@@ -222,13 +234,19 @@ export function Lightbox({
 
   async function doDelete() {
     const acted = entry;
+    const actedPaths = actionPathsFor(acted);
     setConfirmingDelete(false);
-    setStatus(`Deleting ${acted.name}…`);
+    setStatus(`Deleting ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"}…`);
     try {
-      await deleteFile(acted.path);
-      void setMark(dir, acted.name, EMPTY_MARK).catch(() => {});
-      onRemoved(acted.path);
-      setStatus(`Deleted ${acted.name}`);
+      for (const path of actedPaths) {
+        await deleteFile(path);
+      }
+      for (const path of actedPaths) {
+        const name = path.split(/[/\\]/).pop();
+        if (name) void setMark(dir, name, EMPTY_MARK).catch(() => {});
+      }
+      onRemoved(actedPaths);
+      setStatus(`Deleted ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"}`);
     } catch (e) {
       setStatus(`Delete failed: ${String(e)}`);
     }
@@ -461,6 +479,7 @@ export function Lightbox({
  */
 function Slide({ entry, active }: { entry: ImageEntry; active: boolean }) {
   const [fullLoaded, setFullLoaded] = useState(false);
+  const fullSrc = entry.raw ? thumbUrl(entry, 2048) : origUrl(entry);
   return (
     <div className={`ph-lb-slide${active ? " ph-lb-slide-active" : ""}`} aria-hidden={!active}>
       {/* Instant, stretched placeholder (cached grid thumbnail). */}
@@ -473,7 +492,7 @@ function Slide({ entry, active }: { entry: ImageEntry; active: boolean }) {
       />
       {/* The real, full-resolution photo — fades in once decoded. */}
       <img
-        src={origUrl(entry)}
+        src={fullSrc}
         alt={entry.name}
         className="ph-lb-img ph-lb-full"
         style={{ opacity: fullLoaded ? 1 : 0 }}

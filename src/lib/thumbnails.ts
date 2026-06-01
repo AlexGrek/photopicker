@@ -9,6 +9,8 @@ export interface ImageEntry {
   created: number | null;
   /** Last-modified ms since epoch; also the thumbnail URL's cache-busting version. */
   modified: number | null;
+  /** True for RAW files (currently embedded preview only). */
+  raw: boolean;
 }
 
 /** Lists the JPEGs in `dir`. Cheap — reads directory metadata, no file contents. */

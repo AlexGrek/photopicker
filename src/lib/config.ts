@@ -6,4 +6,5 @@ export interface Config {
   recentDirectories: string[];
   targetDirectories: string[];
   lightboxInFullscreen: boolean;
+  enableRawCouplingDetection: boolean;
 }
