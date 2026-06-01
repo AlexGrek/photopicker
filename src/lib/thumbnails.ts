@@ -5,6 +5,8 @@ export interface ImageEntry {
   path: string;
   name: string;
   size: number;
+  /** Created ms since epoch, if the filesystem provides it. */
+  created: number | null;
   /** Last-modified ms since epoch; also the thumbnail URL's cache-busting version. */
   modified: number | null;
 }

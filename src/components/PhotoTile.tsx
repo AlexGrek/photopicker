@@ -5,6 +5,7 @@ import { thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 /** Shared data the masonry passes to every tile. */
 export interface TileContext {
   onOpen: (index: number) => void;
+  mode: "masonry" | "grid";
 }
 
 /**
@@ -25,13 +26,14 @@ export function PhotoTile({
 }) {
   const [aspectRatio, setAspectRatio] = useState("1 / 1");
   const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
+  const isGrid = context.mode === "grid";
 
   return (
     <div className="ph-cell">
       <button
         type="button"
         className="ph-tile"
-        style={{ aspectRatio }}
+        style={{ aspectRatio: isGrid ? "1 / 1" : aspectRatio }}
         onClick={() => context.onOpen(index)}
         title={data.name}
         aria-label={data.name}
@@ -47,7 +49,7 @@ export function PhotoTile({
             style={{ opacity: status === "loaded" ? 1 : 0 }}
             onLoad={(e) => {
               const img = e.currentTarget;
-              if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              if (!isGrid && img.naturalWidth > 0 && img.naturalHeight > 0) {
                 setAspectRatio(`${img.naturalWidth} / ${img.naturalHeight}`);
               }
               setStatus("loaded");

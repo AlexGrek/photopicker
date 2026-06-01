@@ -51,6 +51,8 @@ pub struct ImageEntry {
     /// Last-modified time in milliseconds since the Unix epoch, if available.
     /// Doubles as a cache-busting version for the thumbnail URL.
     pub modified: Option<u64>,
+    /// Created time in milliseconds since the Unix epoch, if available.
+    pub created: Option<u64>,
 }
 
 /// Lists the JPEG files directly inside `dir`, sorted case-insensitively by name.
@@ -71,11 +73,17 @@ pub fn list_images(dir: &str) -> Result<Vec<ImageEntry>, String> {
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64);
+        let created = meta
+            .as_ref()
+            .and_then(|m| m.created().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64);
         out.push(ImageEntry {
             path: path.to_string_lossy().into_owned(),
             name: entry.file_name().to_string_lossy().into_owned(),
             size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
             modified,
+            created,
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
