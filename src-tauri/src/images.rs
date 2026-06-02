@@ -71,6 +71,9 @@ pub fn list_images(dir: &str) -> Result<Vec<ImageEntry>, String> {
     let read = fs::read_dir(dir).map_err(|e| format!("Cannot read {dir}: {e}"))?;
     let mut out = Vec::new();
     for entry in read.flatten() {
+        if is_unix_hidden_name(&entry.file_name()) {
+            continue;
+        }
         let path = entry.path();
         let ext = file_ext(&path);
         let is_raw = is_raw_ext(ext);
@@ -108,6 +111,11 @@ fn file_ext(path: &Path) -> Option<&str> {
     path.extension().and_then(|e| e.to_str())
 }
 
+/// Unix hidden files (names starting with `.`) — e.g. `.DS_Store`, AppleDouble `._foo.jpg`.
+fn is_unix_hidden_name(name: &std::ffi::OsStr) -> bool {
+    name.as_encoded_bytes().first() == Some(&b'.')
+}
+
 fn is_jpeg_ext(ext: Option<&str>) -> bool {
     matches!(ext.map(str::to_ascii_lowercase).as_deref(), Some("jpg" | "jpeg" | "jpe" | "jfif"))
 }
@@ -124,6 +132,9 @@ pub fn list_shot_dates(dir: &str, raw_coupling: bool) -> Result<HashMap<String, 
     let read = fs::read_dir(dir).map_err(|e| format!("Cannot read {dir}: {e}"))?;
     let mut candidates = Vec::<ShotDateCandidate>::new();
     for entry in read.flatten() {
+        if is_unix_hidden_name(&entry.file_name()) {
+            continue;
+        }
         let path = entry.path();
         let ext = file_ext(&path);
         let raw = is_raw_ext(ext);
