@@ -63,6 +63,7 @@ export function Lightbox({
   selectionMode = false,
   selectedPaths,
   onToggleSelected,
+  onSessionSent,
 }: {
   dir: string;
   entries: ImageEntry[];
@@ -87,6 +88,8 @@ export function Lightbox({
   selectionMode?: boolean;
   selectedPaths?: ReadonlySet<string>;
   onToggleSelected?: (path: string) => void;
+  /** Called after a successful copy or move (tracks visible entry path). */
+  onSessionSent?: (paths: string[]) => void;
 }) {
   const entry = entries[index];
   const isSelected = selectedPaths?.has(entry.path) ?? false;
@@ -318,11 +321,13 @@ export function Lightbox({
         for (const path of actedPaths) {
           await copyToTarget(path, target);
         }
+        onSessionSent?.([acted.path]);
         setStatus(`Copied ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}`);
       } else {
         for (const path of actedPaths) {
           await moveToTarget(path, target);
         }
+        onSessionSent?.([acted.path]);
         // Moved files left the folder: drop their marks and tiles.
         for (const path of actedPaths) {
           const name = path.split(/[/\\]/).pop();

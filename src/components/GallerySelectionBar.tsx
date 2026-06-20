@@ -45,6 +45,7 @@ export function GallerySelectionBar({
   onMarksChanged,
   onDone,
   onNotice,
+  onSessionSent,
 }: {
   dir: string;
   selected: BrowserItem[];
@@ -55,6 +56,7 @@ export function GallerySelectionBar({
   onMarksChanged: (marks: Record<string, Mark>) => void;
   onDone: () => void;
   onNotice: (text: string) => void;
+  onSessionSent?: (paths: string[]) => void;
 }) {
   const count = selected.length;
   const anyFlagged = selected.some(
@@ -134,9 +136,11 @@ export function GallerySelectionBar({
     try {
       if (mode === "copy") {
         for (const path of paths) await copyToTarget(path, target);
+        onSessionSent?.(photoSelected.map((item) => item.entry.path));
         onNotice(`Copied ${itemLabel(paths.length)} to ${dest}`);
       } else {
         for (const path of paths) await moveToTarget(path, target);
+        onSessionSent?.(photoSelected.map((item) => item.entry.path));
         for (const item of photoSelected) {
           void setMark(dir, item.entry.name, EMPTY_MARK).catch(() => {});
         }

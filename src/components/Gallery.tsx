@@ -215,6 +215,8 @@ export function Gallery({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
   const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  /** Photo paths successfully copied or moved during this gallery visit. */
+  const [sessionSentPaths, setSessionSentPaths] = useState<Set<string>>(() => new Set());
   const [ghostPath, setGhostPath] = useState<string | null>(null);
   const [closeFlight, setCloseFlight] = useState<{
     fromRect: DOMRect;
@@ -232,6 +234,7 @@ export function Gallery({
 
   useEffect(() => {
     setBrowseStack([dir]);
+    setSessionSentPaths(new Set());
   }, [dir]);
 
   useEffect(() => {
@@ -627,6 +630,22 @@ export function Gallery({
     setSelectionMenuOpen(false);
   }
 
+  function noteSessionSent(paths: string[]) {
+    setSessionSentPaths((prev) => {
+      const next = new Set(prev);
+      for (const path of paths) next.add(path);
+      return next;
+    });
+  }
+
+  function selectSessionSent() {
+    setSelectionMode(true);
+    setSelectedPaths(
+      new Set(visiblePhotos.filter((e) => sessionSentPaths.has(e.path)).map((e) => e.path)),
+    );
+    setSelectionMenuOpen(false);
+  }
+
   function toggleListSelection(path: string) {
     if (!selectionMode && !selectedPaths.has(path)) enterSelectionMode();
     setSelectedPaths((prev) => {
@@ -877,6 +896,16 @@ export function Gallery({
                       </button>
                       <button type="button" className="ph-browse-menu-item" onClick={() => selectByFlag(false)} role="menuitem">
                         Select unflagged
+                      </button>
+                      <div className="ph-browse-menu-sep" />
+                      <button
+                        type="button"
+                        className="ph-browse-menu-item"
+                        onClick={selectSessionSent}
+                        disabled={sessionSentPaths.size === 0}
+                        role="menuitem"
+                      >
+                        Select copied/moved in session
                       </button>
                     </div>
                   )}
@@ -1302,6 +1331,7 @@ export function Gallery({
           onMarksChanged={setMarks}
           onDone={clearSelection}
           onNotice={showNotice}
+          onSessionSent={noteSessionSent}
         />
       )}
 
@@ -1328,6 +1358,7 @@ export function Gallery({
           selectionMode={selectionMode}
           selectedPaths={selectedPaths}
           onToggleSelected={toggleSelectedPath}
+          onSessionSent={noteSessionSent}
         />
       )}
     </div>
