@@ -946,9 +946,9 @@ function Slide({
       {active && overlay && overlayHasData(overlay) && (
         <div className="ph-lb-exif-overlay" aria-hidden>
           {overlay.lens && <span>{overlay.lens}</span>}
-          {(overlay.aperture || overlay.shutter || overlay.iso || overlay.focusDistance) && (
+          {(overlay.focalLength || overlay.aperture || overlay.shutter || overlay.iso || overlay.focusDistance) && (
             <span>
-              {[overlay.aperture, overlay.shutter, overlay.iso, overlay.focusDistance]
+              {[overlay.focalLength, overlay.aperture, overlay.shutter, overlay.iso, overlay.focusDistance]
                 .filter(Boolean)
                 .join(" · ")}
             </span>

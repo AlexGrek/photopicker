@@ -545,6 +545,7 @@ pub struct ExifField {
 #[serde(rename_all = "camelCase")]
 pub struct ExifOverlay {
     pub lens: Option<String>,
+    pub focal_length: Option<String>,
     pub aperture: Option<String>,
     pub shutter: Option<String>,
     pub iso: Option<String>,
@@ -686,6 +687,31 @@ fn format_aperture(exif: &exif::Exif) -> Option<String> {
     None
 }
 
+fn format_focal_length(exif: &exif::Exif) -> Option<String> {
+    if let Some(field) = find_field_by_tag(exif, exif::Tag::FocalLength) {
+        if let exif::Value::Rational(ref v) = field.value {
+            if let Some(r) = v.first() {
+                if r.denom != 0 {
+                    let mm = r.num as f64 / r.denom as f64;
+                    if mm.is_finite() && mm > 0.0 {
+                        let rounded = (mm * 10.0).round() / 10.0;
+                        return Some(if (rounded - rounded.round()).abs() < 0.05 {
+                            format!("{} mm", rounded.round() as i64)
+                        } else {
+                            format!("{rounded:.1} mm")
+                        });
+                    }
+                }
+            }
+        }
+        let s = field_display(field).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
+}
+
 fn format_lens(exif: &exif::Exif) -> Option<String> {
     if let Some(field) = exif.get_field(exif::Tag::LensModel, exif::In::PRIMARY) {
         let s = field_display(&field);
@@ -791,6 +817,7 @@ fn format_focus_distance(exif: &exif::Exif) -> Option<String> {
 fn build_exif_overlay(exif: &exif::Exif) -> ExifOverlay {
     ExifOverlay {
         lens: format_lens(exif),
+        focal_length: format_focal_length(exif),
         aperture: format_aperture(exif),
         shutter: format_exposure(exif),
         iso: format_iso(exif),
@@ -853,5 +880,14 @@ mod exif_overlay_tests {
         assert_eq!(format_distance_meters(2.5), "2.5 m");
         assert_eq!(format_distance_meters(120.0), "120 m");
         assert_eq!(format_distance_meters(f64::INFINITY), "∞");
+    }
+
+    #[test]
+    fn format_focal_length_from_rational() {
+        let path = "/Users/user/Nextcloud/Photos/DSCF0147.JPG";
+        let Ok(Some(exif)) = load_exif_container(path) else {
+            return;
+        };
+        assert_eq!(format_focal_length(&exif).as_deref(), Some("23 mm"));
     }
 }
