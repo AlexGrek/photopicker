@@ -1,5 +1,6 @@
 mod config;
 mod images;
+mod makernote;
 mod marks;
 
 use std::collections::HashMap;
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use config::Config;
-use images::{ExifInfo, ImageEntry};
+use images::{DirectoryEntry, ExifInfo, ImageEntry};
 use little_exif::exif_tag::ExifTag;
 use little_exif::ifd::ExifTagGroup;
 use little_exif::metadata::Metadata;
@@ -104,6 +105,20 @@ async fn list_images(dir: String) -> Result<Vec<ImageEntry>, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn list_directories(dir: String) -> Result<Vec<DirectoryEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || images::list_directories(&dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn directory_preview(dir: String, max_depth: u32) -> Result<Vec<ImageEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || images::directory_preview(&dir, max_depth))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Reads EXIF shot dates for supported files in `dir` (slow path, on demand).
 /// Returns a map keyed by absolute file path.
 #[tauri::command]
@@ -151,6 +166,22 @@ fn add_target_directory(dir: String) -> Result<Config, String> {
 fn remove_target_directory(dir: String) -> Result<Config, String> {
     let mut cfg = Config::load();
     cfg.remove_target_directory(&dir);
+    cfg.save()?;
+    Ok(cfg)
+}
+
+#[tauri::command]
+fn set_last_target_directory(dir: String) -> Result<Config, String> {
+    let mut cfg = Config::load();
+    cfg.set_last_target_directory(dir);
+    cfg.save()?;
+    Ok(cfg)
+}
+
+#[tauri::command]
+fn remove_recent_directory(dir: String) -> Result<Config, String> {
+    let mut cfg = Config::load();
+    cfg.remove_recent_directory(&dir);
     cfg.save()?;
     Ok(cfg)
 }
@@ -366,14 +397,49 @@ fn unique_destination(src: &Path, target_dir: &str) -> Result<PathBuf, String> {
     unreachable!("the loop always returns")
 }
 
+fn copy_path_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+        for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            copy_path_recursive(&entry.path(), &dest.join(name))?;
+        }
+    } else {
+        std::fs::copy(src, dest).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn remove_path_recursive(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    }
+}
+
+fn move_path(src: &Path, dest: &Path) -> Result<(), String> {
+    if std::fs::rename(src, dest).is_err() {
+        copy_path_recursive(src, dest)?;
+        remove_path_recursive(src)?;
+    }
+    Ok(())
+}
+
 /// Copies the photo at `src` into `target_dir` (one of the configured target
 /// locations), never overwriting an existing file. Returns the destination path.
 /// Off-thread: originals can be 100 MP, and the copy must not freeze the window.
 #[tauri::command]
 async fn copy_to_target(src: String, target_dir: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dest = unique_destination(Path::new(&src), &target_dir)?;
-        std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+        let src = Path::new(&src);
+        let dest = unique_destination(src, &target_dir)?;
+        if src.is_dir() {
+            copy_path_recursive(src, &dest)?;
+        } else {
+            std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        }
         Ok(dest.to_string_lossy().into_owned())
     })
     .await
@@ -387,22 +453,20 @@ async fn copy_to_target(src: String, target_dir: String) -> Result<String, Strin
 #[tauri::command]
 async fn move_to_target(src: String, target_dir: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dest = unique_destination(Path::new(&src), &target_dir)?;
-        if std::fs::rename(&src, &dest).is_err() {
-            std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
-            std::fs::remove_file(&src).map_err(|e| e.to_string())?;
-        }
+        let src = Path::new(&src);
+        let dest = unique_destination(src, &target_dir)?;
+        move_path(src, &dest)?;
         Ok(dest.to_string_lossy().into_owned())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// Permanently deletes the photo at `path`. Destructive and irreversible — the
-/// caller (lightbox) gates this behind an explicit confirmation.
+/// Permanently deletes the photo or folder at `path`. Destructive and irreversible —
+/// the caller gates this behind an explicit confirmation.
 #[tauri::command]
 async fn delete_file(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || std::fs::remove_file(&path).map_err(|e| e.to_string()))
+    tauri::async_runtime::spawn_blocking(move || remove_path_recursive(Path::new(&path)))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -523,6 +587,8 @@ pub fn run() {
             push_recent_directory,
             add_target_directory,
             remove_target_directory,
+            set_last_target_directory,
+            remove_recent_directory,
             get_marks,
             set_mark,
             clear_flags,
@@ -533,6 +599,8 @@ pub fn run() {
             move_to_target,
             delete_file,
             list_images,
+            list_directories,
+            directory_preview,
             list_shot_dates,
             get_exif_info,
             take_pending_open,

@@ -1,13 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { VirtuosoMasonry, type ItemContent } from "@virtuoso.dev/masonry";
-import { ArrowLeft, CalendarDays, ChevronLeft, ChevronRight, Ellipsis, Flag, ImageOff, SlidersHorizontal, Star, X } from "lucide-react";
+import { VirtuosoMasonry } from "@virtuoso.dev/masonry";
+import { ArrowLeft, CalendarDays, Check, ChevronLeft, ChevronRight, ChevronDown, Ellipsis, Flag, ImageOff, SlidersHorizontal, SquareCheck, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { listImages, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
+import {
+  listDirectories,
+  PREVIEW_RECURSION_LIMIT,
+  type BrowserItem,
+  type DirectoryEntry,
+  itemPath,
+  isPhotoItem,
+} from "@/lib/browse";
 import { type Config } from "@/lib/config";
 import { EMPTY_MARK, clearFlags, clearStars, getMarks, writeStarsToExif, type Mark } from "@/lib/marks";
-import { PhotoTile, type TileContext } from "./PhotoTile";
+import { BrowserTile, type BrowserTileContext } from "./BrowserTile";
+import { DirectoryListRow } from "./DirectoryTile";
 import { Lightbox } from "./Lightbox";
+import { GallerySelectionBar } from "./GallerySelectionBar";
+import { LightboxCloseFlight } from "./LightboxCloseFlight";
+import { findPhotoElement, photoPathAttr, scrollToPhoto } from "@/lib/photoScroll";
 
 /** Pick a column count that keeps tiles a comfortable size at any window width. */
 function useColumnCount(): number {
@@ -28,7 +40,7 @@ function useColumnCount(): number {
   return count;
 }
 
-const TileItem = PhotoTile as ItemContent<ImageEntry, TileContext>;
+const TileItem = BrowserTile;
 type ViewMode = "masonry" | "grid" | "list";
 type SortMode = "nameAsc" | "nameDesc" | "createdDesc" | "createdAsc" | "shotDesc" | "shotAsc";
 const SORT_LABEL: Record<SortMode, string> = {
@@ -162,16 +174,25 @@ export function Gallery({
   dir,
   initialFile,
   onBack,
+  onRemoveUnreachable,
 }: {
   dir: string;
   /** File name to pop into the lightbox once this directory loads (an "Open with"
    *  / file-association launch); ignored thereafter. */
   initialFile?: string;
   onBack: () => void;
+  /** Called to drop this unreachable folder from Last Locations and return to the menu. */
+  onRemoveUnreachable?: () => void | Promise<void>;
 }) {
   const columnCount = useColumnCount();
+  const [browseStack, setBrowseStack] = useState<string[]>(() => [dir]);
+  const currentDir = browseStack[browseStack.length - 1] ?? dir;
+  const browseDepth = browseStack.length - 1;
+  const previewDepth = Math.max(0, PREVIEW_RECURSION_LIMIT - browseDepth);
+  const [directories, setDirectories] = useState<DirectoryEntry[] | null>(null);
   const [entries, setEntries] = useState<ImageEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [unreadable, setUnreadable] = useState(false);
+  const [removingUnreachable, setRemovingUnreachable] = useState(false);
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   // Per-photo marks for this directory, keyed by file name. Loaded with the listing
   // and refreshed when the lightbox closes, so rating/flag edits there feed the filters.
@@ -191,52 +212,76 @@ export function Gallery({
   const [dateDrawerOpen, setDateDrawerOpen] = useState(false);
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => monthStart(new Date()));
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
+  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  const [ghostPath, setGhostPath] = useState<string | null>(null);
+  const [closeFlight, setCloseFlight] = useState<{
+    fromRect: DOMRect;
+    toRect: DOMRect;
+    imageSrc: string;
+    path: string;
+  } | null>(null);
   const browseMenuRef = useRef<HTMLDivElement | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const dateDrawerRef = useRef<HTMLDivElement | null>(null);
+  const selectionMenuRef = useRef<HTMLDivElement | null>(null);
   // Which `initialFile` we've already auto-opened, so later list changes (e.g. a
   // move/delete dropping a tile) never yank the lightbox back to the opened photo.
   const openedFileRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    setBrowseStack([dir]);
+  }, [dir]);
+
+  useEffect(() => {
     let alive = true;
+    setDirectories(null);
     setEntries(null);
-    setError(null);
+    setUnreadable(false);
+    setRemovingUnreachable(false);
     setOpenIndex(null);
     setActionMenuOpen(false);
     setBrowseMenuOpen(false);
     setDateDrawerOpen(false);
     setSelectedDay(null);
     setCalendarMonth(monthStart(new Date()));
+    setSelectionMode(false);
+    setSelectedPaths(new Set());
+    setSelectionMenuOpen(false);
+    setGhostPath(null);
+    setCloseFlight(null);
     setMarks({});
     setShotDateByPath({});
     setShotDateKeyLoaded(null);
     openedFileRef.current = undefined;
     Promise.all([
-      listImages(dir),
+      listImages(currentDir),
+      listDirectories(currentDir),
       invoke<Config>("get_config").catch(() => ({ enableRawCouplingDetection: true } as Config)),
     ]).then(
-      ([list, cfg]) => {
+      ([list, dirs, cfg]) => {
         if (!alive) return;
         const detectionEnabled = cfg.enableRawCouplingDetection;
         setEnableRawCouplingDetection(detectionEnabled);
+        setDirectories(dirs);
         setEntries(list);
         const autoEnabled = detectionEnabled && detectRawCouplingBySample(list);
         setRawCoupling(autoEnabled);
         if (autoEnabled) setGalleryNotice({ id: Date.now(), text: "Raw coupling enabled" });
       },
-      (e) => {
-        if (alive) setError(String(e));
+      () => {
+        if (alive) setUnreadable(true);
       },
     );
-    getMarks(dir).then(
+    getMarks(currentDir).then(
       (m) => alive && setMarks(m),
       () => {},
     );
     return () => {
       alive = false;
     };
-  }, [dir]);
+  }, [currentDir]);
 
   useEffect(() => {
     if (!galleryNotice) return;
@@ -245,12 +290,12 @@ export function Gallery({
   }, [galleryNotice]);
 
   const shotSort = sortMode === "shotDesc" || sortMode === "shotAsc";
-  const shotDateLoadKey = `${dir}:${rawCoupling ? "coupled" : "plain"}`;
+  const shotDateLoadKey = `${currentDir}:${rawCoupling ? "coupled" : "plain"}`;
   useEffect(() => {
     if (!shotSort) return;
     if (shotDateKeyLoaded === shotDateLoadKey) return;
     let alive = true;
-    invoke<Record<string, number>>("list_shot_dates", { dir, rawCoupling }).then(
+    invoke<Record<string, number>>("list_shot_dates", { dir: currentDir, rawCoupling }).then(
       (map) => {
         if (!alive) return;
         setShotDateByPath(map);
@@ -265,7 +310,7 @@ export function Gallery({
     return () => {
       alive = false;
     };
-  }, [dir, rawCoupling, shotSort, shotDateKeyLoaded, shotDateLoadKey]);
+  }, [currentDir, rawCoupling, shotSort, shotDateKeyLoaded, shotDateLoadKey]);
 
   const filtersActive = minRating > 0 || flaggedOnly || selectedDay !== null;
 
@@ -330,8 +375,8 @@ export function Gallery({
   );
 
   // The photos actually shown — the grid and the lightbox both navigate this list,
-  // so `openIndex` always indexes the filtered set.
-  const visible = useMemo<ImageEntry[]>(() => {
+  // so `openIndex` always indexes the filtered photo set (directories are separate).
+  const visiblePhotos = useMemo<ImageEntry[]>(() => {
     const filtered = selectedDay
       ? byMarkFilter.filter((entry) => {
           const ts = timestampForFilter(entry);
@@ -361,12 +406,42 @@ export function Gallery({
     return sorted;
   }, [byMarkFilter, selectedDay, sortMode, shotDateByPath]);
 
+  const visibleDirectories = useMemo<DirectoryEntry[]>(() => {
+    if (!directories) return [];
+    const sorted = [...directories];
+    sorted.sort((a, b) => {
+      if (sortMode === "nameDesc") {
+        return b.name.localeCompare(a.name, undefined, { sensitivity: "base" });
+      }
+      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+    });
+    return sorted;
+  }, [directories, sortMode]);
+
+  const visibleItems = useMemo<BrowserItem[]>(() => {
+    const items: BrowserItem[] = visibleDirectories.map((d) => ({
+      kind: "directory",
+      path: d.path,
+      name: d.name,
+    }));
+    for (const entry of visiblePhotos) {
+      items.push({ kind: "photo", entry });
+    }
+    return items;
+  }, [visibleDirectories, visiblePhotos]);
+
+  const photoIndexByPath = useMemo(() => {
+    const map = new Map<string, number>();
+    visiblePhotos.forEach((entry, i) => map.set(entry.path, i));
+    return map;
+  }, [visiblePhotos]);
+
   // Filtering can drastically shrink the list; with window-scroll virtualization,
   // keeping an old deep scroll offset may leave the viewport beyond the new data.
   // Reset to top whenever the filter state changes.
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-  }, [minRating, flaggedOnly, selectedDay, sortMode, viewMode, rawCoupling]);
+  }, [minRating, flaggedOnly, selectedDay, sortMode, viewMode, rawCoupling, currentDir]);
 
   useEffect(() => {
     if (!browseMenuOpen) return;
@@ -408,6 +483,31 @@ export function Gallery({
     };
   }, [dateDrawerOpen]);
 
+  useEffect(() => {
+    if (!selectionMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (selectionMenuRef.current && !selectionMenuRef.current.contains(e.target as Node)) {
+        setSelectionMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [selectionMenuOpen]);
+
+  // Drop selections that are no longer visible after filter/sort changes.
+  useEffect(() => {
+    setSelectedPaths((prev) => {
+      if (prev.size === 0) return prev;
+      const visiblePaths = new Set(visibleItems.map(itemPath));
+      let changed = false;
+      const next = new Set<string>();
+      for (const path of prev) {
+        if (visiblePaths.has(path)) next.add(path);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [visibleItems]);
   // Once the directory's entries are in, jump to the OS-opened file — exactly once
   // per requested file. Clears any active filter first so the file always shows.
   useEffect(() => {
@@ -420,27 +520,138 @@ export function Gallery({
       return;
     }
     openedFileRef.current = initialFile;
-    const i = visible.findIndex((e) => e.name === initialFile);
+    const i = visiblePhotos.findIndex((e) => e.name === initialFile);
     if (i >= 0) {
       setOpenIndex(i);
       return;
     }
     if (rawCoupling) {
       const key = stemKey(initialFile);
-      const paired = visible.findIndex((e) => stemKey(e.name) === key);
+      const paired = visiblePhotos.findIndex((e) => stemKey(e.name) === key);
       if (paired >= 0) setOpenIndex(paired);
     }
-  }, [initialFile, entries, visible, minRating, flaggedOnly, selectedDay, rawCoupling]);
+  }, [initialFile, entries, visiblePhotos, minRating, flaggedOnly, selectedDay, rawCoupling]);
 
-  const context = useMemo<TileContext>(
-    () => ({ onOpen: (i) => setOpenIndex(i), mode: viewMode === "grid" ? "grid" : "masonry" }),
-    [viewMode],
+  function openDirectory(path: string) {
+    setOpenIndex(null);
+    setBrowseStack((prev) => [...prev, path]);
+  }
+
+  function goUpOneDirectory() {
+    setOpenIndex(null);
+    setBrowseStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+  }
+
+  function handleHeadBack() {
+    if (browseDepth > 0) goUpOneDirectory();
+    else onBack();
+  }
+
+  const context = useMemo<BrowserTileContext>(
+    () => ({
+      onOpen: (i) => setOpenIndex(i),
+      mode: viewMode === "grid" ? "grid" : "masonry",
+      selectionMode,
+      selectedPaths,
+      ghostPath,
+      previewDepth,
+      onToggleSelect: (path) => {
+        setSelectedPaths((prev) => {
+          const next = new Set(prev);
+          if (next.has(path)) next.delete(path);
+          else next.add(path);
+          return next;
+        });
+      },
+      photoIndexForPath: (path) => photoIndexByPath.get(path) ?? -1,
+      onOpenDirectory: openDirectory,
+    }),
+    [viewMode, selectionMode, selectedPaths, ghostPath, visiblePhotos, previewDepth, photoIndexByPath],
   );
+
+  const selectedItems = useMemo(
+    () => visibleItems.filter((item) => selectedPaths.has(itemPath(item))),
+    [visibleItems, selectedPaths],
+  );
+  const hasSelection = selectedItems.length > 0;
+
+  function enterSelectionMode() {
+    setSelectionMode(true);
+    setOpenIndex(null);
+  }
+
+  function clearSelection() {
+    setSelectedPaths(new Set());
+    setSelectionMode(false);
+    setSelectionMenuOpen(false);
+  }
+
+  function toggleSelectionMode() {
+    if (selectionMode || hasSelection) clearSelection();
+    else enterSelectionMode();
+  }
+
+  function selectAllVisible() {
+    setSelectionMode(true);
+    setSelectedPaths(new Set(visibleItems.map(itemPath)));
+    setSelectionMenuOpen(false);
+  }
+
+  function selectNone() {
+    setSelectedPaths(new Set());
+    setSelectionMenuOpen(false);
+  }
+
+  function invertSelection() {
+    setSelectionMode(true);
+    setSelectedPaths((prev) => {
+      const next = new Set<string>();
+      for (const item of visibleItems) {
+        const path = itemPath(item);
+        if (!prev.has(path)) next.add(path);
+      }
+      return next;
+    });
+    setSelectionMenuOpen(false);
+  }
+
+  function selectByFlag(flagged: boolean) {
+    setSelectionMode(true);
+    setSelectedPaths(
+      new Set(
+        visiblePhotos
+          .filter((e) => (marks[e.name] ?? EMPTY_MARK).flag === flagged)
+          .map((e) => e.path),
+      ),
+    );
+    setSelectionMenuOpen(false);
+  }
+
+  function toggleListSelection(path: string) {
+    if (!selectionMode && !selectedPaths.has(path)) enterSelectionMode();
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  function toggleSelectedPath(path: string) {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
 
   // Latest visible list, so back-to-back removals (fired from async callbacks) never
   // operate on a stale list and resurrect an already-removed photo.
-  const visibleRef = useRef(visible);
-  visibleRef.current = visible;
+  const visiblePhotosRef = useRef(visiblePhotos);
+  visiblePhotosRef.current = visiblePhotos;
+  const visibleItemsRef = useRef(visibleItems);
+  visibleItemsRef.current = visibleItems;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
 
@@ -448,13 +659,28 @@ export function Gallery({
   // on whatever slides into its place (closing if nothing visible is left).
   function handleRemoved(paths: string[]) {
     const removed = new Set(paths);
+    setSelectedPaths((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      for (const path of prev) {
+        if (removed.has(path)) changed = true;
+        else next.add(path);
+      }
+      return changed ? next : prev;
+    });
     const full = entriesRef.current;
     if (full) {
       const remaining = full.filter((e) => !removed.has(e.path));
       entriesRef.current = remaining;
       setEntries(remaining);
     }
-    const vis = visibleRef.current;
+    setDirectories((prev) => {
+      if (!prev) return prev;
+      const remaining = prev.filter((d) => !removed.has(d.path));
+      return remaining.length === prev.length ? prev : remaining;
+    });
+    const vis = visiblePhotosRef.current;
     setOpenIndex((idx) => {
       if (idx === null) return idx;
       const current = vis[idx];
@@ -469,7 +695,41 @@ export function Gallery({
   // Re-read marks after culling in the lightbox so the filters reflect new ratings/flags.
   function closeLightbox() {
     setOpenIndex(null);
-    getMarks(dir).then(setMarks, () => {});
+    getMarks(currentDir).then(setMarks, () => {});
+  }
+
+  const animateCloseLightbox = useCallback(
+    async (info: {
+      path: string;
+      index: number;
+      getSourceRect: () => DOMRect | null;
+      imageSrc: string;
+    }) => {
+      const { path, index, getSourceRect, imageSrc } = info;
+      const total = visiblePhotosRef.current.length;
+
+      setGhostPath(path);
+      await scrollToPhoto(path, index, total);
+
+      const targetRect = findPhotoElement(path)?.getBoundingClientRect() ?? null;
+      const sourceRect = getSourceRect();
+
+      if (!targetRect || !sourceRect) {
+        setGhostPath(null);
+        closeLightbox();
+        return;
+      }
+
+      setCloseFlight({ fromRect: sourceRect, toRect: targetRect, imageSrc, path });
+      setOpenIndex(null);
+    },
+    [dir],
+  );
+
+  function finishCloseFlight() {
+    setCloseFlight(null);
+    setGhostPath(null);
+    getMarks(currentDir).then(setMarks, () => {});
   }
 
   function handleEntryUpdated(path: string, modified: number | null) {
@@ -504,17 +764,17 @@ export function Gallery({
     setBusyAction(kind);
     try {
       if (kind === "flags") {
-        const changed = await clearFlags(dir);
-        const fresh = await getMarks(dir);
+        const changed = await clearFlags(currentDir);
+        const fresh = await getMarks(currentDir);
         setMarks(fresh);
         showNotice(`Removed flags from ${changed} photo${changed === 1 ? "" : "s"}`);
       } else if (kind === "stars") {
-        const changed = await clearStars(dir);
-        const fresh = await getMarks(dir);
+        const changed = await clearStars(currentDir);
+        const fresh = await getMarks(currentDir);
         setMarks(fresh);
         showNotice(`Removed stars from ${changed} photo${changed === 1 ? "" : "s"}`);
       } else {
-        const summary = await writeStarsToExif(dir);
+        const summary = await writeStarsToExif(currentDir);
         showNotice(
           `EXIF written: ${summary.written}, skipped: ${summary.skipped}, failed: ${summary.failed}`,
         );
@@ -527,34 +787,102 @@ export function Gallery({
     }
   }
 
+  const listingLoaded = entries !== null && directories !== null;
+  const folderCount = directories?.length ?? 0;
+  const hasBrowsableContent = listingLoaded && (folderCount > 0 || baseEntries.length > 0);
+
   return (
-    <div className="ph-gallery">
+    <div className={`ph-gallery${hasSelection ? " ph-gallery-has-selection" : ""}`}>
       {galleryNotice && (
         <div className="ph-gallery-notice" key={galleryNotice.id}>
           {galleryNotice.text}
         </div>
       )}
       <header className="ph-gallery-head">
-        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onBack} title="Back">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={handleHeadBack}
+          title={browseDepth > 0 ? "Back to parent folder" : "Back to menu"}
+        >
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div className="ph-gallery-title">
-          <span className="ph-gallery-name" title={dir}>
-            {dirName(dir)}
+          <span className="ph-gallery-name" title={currentDir}>
+            {dirName(currentDir)}
           </span>
-          {entries ? (
+          {listingLoaded ? (
             <span className="ph-gallery-count">
               {filtersActive
-                ? `${visible.length} of ${baseEntries.length}`
-                : `${baseEntries.length} photo${baseEntries.length === 1 ? "" : "s"}`}
+                ? `${visiblePhotos.length} of ${baseEntries.length} photo${baseEntries.length === 1 ? "" : "s"}`
+                : [
+                    folderCount > 0 ? `${folderCount} folder${folderCount === 1 ? "" : "s"}` : null,
+                    `${baseEntries.length} photo${baseEntries.length === 1 ? "" : "s"}`,
+                  ]
+                    .filter(Boolean)
+                    .join(", ")}
             </span>
-          ) : error ? null : (
+          ) : unreadable ? null : (
             <span className="ph-gallery-count ph-gallery-loading">Reading folder…</span>
           )}
         </div>
 
-        {entries && entries.length > 0 && (
+        {hasBrowsableContent && (
           <div className="ph-gallery-controls">
+            <div className="ph-gallery-select-wrap" ref={selectionMenuRef}>
+              <button
+                type="button"
+                className={`ph-select-toggle${selectionMode || hasSelection ? " ph-select-toggle-on" : ""}`}
+                onClick={toggleSelectionMode}
+                title={selectionMode || hasSelection ? "Exit selection" : "Select photos"}
+                aria-pressed={selectionMode || hasSelection}
+              >
+                <SquareCheck className="h-4 w-4" />
+                <span className="ph-select-toggle-label">Select</span>
+              </button>
+              {(selectionMode || hasSelection) && (
+                <>
+                  <button
+                    type="button"
+                    className="ph-select-menu-button"
+                    onClick={() => {
+                      setBrowseMenuOpen(false);
+                      setActionMenuOpen(false);
+                      setSelectionMenuOpen((v) => !v);
+                    }}
+                    aria-haspopup="menu"
+                    aria-expanded={selectionMenuOpen}
+                    title="Selection options"
+                  >
+                    <span className="ph-select-menu-count">
+                      {hasSelection ? `${selectedItems.length} selected` : "Selection"}
+                    </span>
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  </button>
+                  {selectionMenuOpen && (
+                    <div className="ph-browse-menu ph-select-menu" role="menu" aria-label="Selection options">
+                      <button type="button" className="ph-browse-menu-item" onClick={selectAllVisible} role="menuitem">
+                        Select all
+                      </button>
+                      <button type="button" className="ph-browse-menu-item" onClick={selectNone} role="menuitem">
+                        Select none
+                      </button>
+                      <button type="button" className="ph-browse-menu-item" onClick={invertSelection} role="menuitem">
+                        Invert selection
+                      </button>
+                      <div className="ph-browse-menu-sep" />
+                      <button type="button" className="ph-browse-menu-item" onClick={() => selectByFlag(true)} role="menuitem">
+                        Select flagged
+                      </button>
+                      <button type="button" className="ph-browse-menu-item" onClick={() => selectByFlag(false)} role="menuitem">
+                        Select unflagged
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
             <div className="ph-gallery-filters">
               <div className="ph-filter-stars" role="group" aria-label="Filter by minimum rating">
                 {[1, 2, 3, 4, 5].map((n) => (
@@ -709,55 +1037,140 @@ export function Gallery({
         )}
       </header>
 
-      {error ? (
-        <div className="ph-gallery-message">
-          <ImageOff className="h-5 w-5" />
-          <span>Could not read this folder.</span>
+      {unreadable ? (
+        <div className="ph-gallery-message ph-gallery-unreadable">
+          <ImageOff className="h-5 w-5 shrink-0" />
+          <div className="ph-gallery-unreadable-body">
+            <p>This folder could not be read.</p>
+            <p className="ph-gallery-unreadable-q">Remove from Last Locations?</p>
+            <div className="ph-gallery-unreadable-actions">
+              <button
+                type="button"
+                className="ph-gallery-unreadable-remove"
+                disabled={removingUnreachable || !onRemoveUnreachable}
+                onClick={() => {
+                  if (!onRemoveUnreachable) return;
+                  setRemovingUnreachable(true);
+                  void Promise.resolve(onRemoveUnreachable()).catch(() => setRemovingUnreachable(false));
+                }}
+              >
+                <Check className="h-4 w-4" />
+                <span>Remove</span>
+              </button>
+              <button type="button" className="ph-gallery-unreadable-keep" onClick={onBack}>
+                <X className="h-4 w-4" />
+                <span>Keep</span>
+              </button>
+            </div>
+          </div>
         </div>
-      ) : entries === null ? (
+      ) : !listingLoaded ? (
         <GallerySkeleton columnCount={columnCount} />
-      ) : entries.length === 0 ? (
+      ) : !hasBrowsableContent ? (
         <div className="ph-gallery-message">
           <ImageOff className="h-5 w-5" />
-          <span>No supported photos in this folder.</span>
+          <span>No folders or supported photos here.</span>
         </div>
-      ) : visible.length === 0 ? (
+      ) : visibleItems.length === 0 ? (
         <div className="ph-gallery-message">
           <ImageOff className="h-5 w-5" />
           <span>No photos match the filter.</span>
         </div>
       ) : viewMode === "list" ? (
         <ul className="ph-gallery-list">
-          {visible.map((entry, i) => (
-            <li key={entry.path} className="ph-gallery-list-item">
-              <button
-                type="button"
-                className="ph-gallery-list-row"
-                onClick={() => setOpenIndex(i)}
-                title={entry.name}
+          {visibleItems.map((item) => {
+            if (!isPhotoItem(item)) {
+              const selected = selectedPaths.has(item.path);
+              return (
+                <li key={item.path} className="ph-gallery-list-item">
+                  <DirectoryListRow
+                    data={item}
+                    previewDepth={previewDepth}
+                    selectionMode={selectionMode}
+                    selected={selected}
+                    onOpen={openDirectory}
+                    onToggleSelect={(path) => toggleListSelection(path)}
+                  />
+                </li>
+              );
+            }
+            const entry = item.entry;
+            const i = photoIndexByPath.get(entry.path) ?? -1;
+            const selected = selectedPaths.has(entry.path);
+            return (
+              <li
+                key={entry.path}
+                className={`ph-gallery-list-item${selected ? " ph-gallery-list-item-selected" : ""}${ghostPath === entry.path ? " ph-gallery-list-item-ghost" : ""}`}
               >
-                <img
-                  src={thumbUrl(entry, 128)}
-                  alt={entry.name}
-                  className="ph-gallery-list-thumb"
-                  loading="lazy"
-                  decoding="async"
-                  draggable={false}
-                />
-                <span className="ph-gallery-list-text">
-                  <span className="ph-gallery-list-name">{entry.name}</span>
-                  <span className="ph-gallery-list-date">{formatCreated(entry)}</span>
-                </span>
-              </button>
-            </li>
-          ))}
+                {selectionMode ? (
+                  <div
+                    className="ph-gallery-list-row"
+                    data-photo-path={photoPathAttr(entry.path)}
+                  >
+                    <button
+                      type="button"
+                      className="ph-gallery-list-hit"
+                      onClick={() => toggleListSelection(entry.path)}
+                      title={entry.name}
+                      aria-pressed={selected}
+                    >
+                      <span className={`ph-list-check${selected ? " ph-list-check-on" : ""}`} aria-hidden>
+                        {selected && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+                      </span>
+                      <img
+                        src={thumbUrl(entry, 128)}
+                        alt={entry.name}
+                        className="ph-gallery-list-thumb"
+                        loading="lazy"
+                        decoding="async"
+                        draggable={false}
+                      />
+                      <span className="ph-gallery-list-text">
+                        <span className="ph-gallery-list-name">{entry.name}</span>
+                        <span className="ph-gallery-list-date">{formatCreated(entry)}</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="ph-gallery-list-open"
+                      onClick={() => setOpenIndex(i)}
+                      title="Open fullscreen"
+                    >
+                      Open
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="ph-gallery-list-row"
+                    data-photo-path={photoPathAttr(entry.path)}
+                    onClick={() => setOpenIndex(i)}
+                    title={entry.name}
+                  >
+                    <img
+                      src={thumbUrl(entry, 128)}
+                      alt={entry.name}
+                      className="ph-gallery-list-thumb"
+                      loading="lazy"
+                      decoding="async"
+                      draggable={false}
+                    />
+                    <span className="ph-gallery-list-text">
+                      <span className="ph-gallery-list-name">{entry.name}</span>
+                      <span className="ph-gallery-list-date">{formatCreated(entry)}</span>
+                    </span>
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
       ) : (
         <VirtuosoMasonry
-          key={`${dir}:${viewMode}:${sortMode}:${rawCoupling ? "coupled" : "plain"}:${minRating}:${flaggedOnly ? "flagged" : "all"}`}
+          key={`${currentDir}:${viewMode}:${sortMode}:${rawCoupling ? "coupled" : "plain"}:${minRating}:${flaggedOnly ? "flagged" : "all"}`}
           useWindowScroll
           columnCount={columnCount}
-          data={visible}
+          data={visibleItems}
           context={context}
           ItemContent={TileItem}
           className="ph-masonry"
@@ -878,16 +1291,43 @@ export function Gallery({
         </div>
       )}
 
-      {openIndex !== null && visible[openIndex] && (
+      {hasSelection && (
+        <GallerySelectionBar
+          dir={currentDir}
+          selected={selectedItems}
+          marks={marks}
+          actionPathsByPath={rawCoupling ? rawCouplingMeta.actionPathsByPath : {}}
+          onRemoved={handleRemoved}
+          onEntryUpdated={handleEntryUpdated}
+          onMarksChanged={setMarks}
+          onDone={clearSelection}
+          onNotice={showNotice}
+        />
+      )}
+
+      {closeFlight && (
+        <LightboxCloseFlight
+          fromRect={closeFlight.fromRect}
+          toRect={closeFlight.toRect}
+          imageSrc={closeFlight.imageSrc}
+          onComplete={finishCloseFlight}
+        />
+      )}
+
+      {openIndex !== null && visiblePhotos[openIndex] && (
         <Lightbox
-          dir={dir}
-          entries={visible}
+          dir={currentDir}
+          entries={visiblePhotos}
           index={openIndex}
           onIndex={setOpenIndex}
           onClose={closeLightbox}
+          onAnimateClose={animateCloseLightbox}
           onRemoved={handleRemoved}
           onEntryUpdated={handleEntryUpdated}
           actionPathsByPath={rawCoupling ? rawCouplingMeta.actionPathsByPath : {}}
+          selectionMode={selectionMode}
+          selectedPaths={selectedPaths}
+          onToggleSelected={toggleSelectedPath}
         />
       )}
     </div>

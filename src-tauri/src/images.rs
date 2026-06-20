@@ -40,6 +40,14 @@ const EXIF_THUMB_MAX_EDGE: u32 = 512;
 /// A guard against pathological / corrupt SOF dimensions blowing up memory.
 const MAX_DECODE_EDGE: usize = 1 << 17; // 131072 px
 
+/// One subdirectory in a browsed directory. Cheap — pure directory metadata.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryEntry {
+    pub path: String,
+    pub name: String,
+}
+
 /// One image file in a browsed directory. Cheap to produce — pure directory metadata.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +74,122 @@ struct ShotDateCandidate {
     jpeg: bool,
 }
 
+fn image_entry_from_path(path: &Path, name: &std::ffi::OsStr) -> Option<ImageEntry> {
+    let ext = file_ext(path);
+    let is_raw = is_raw_ext(ext);
+    if !is_jpeg_ext(ext) && !is_raw {
+        return None;
+    }
+    let meta = path.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    let created = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64);
+    Some(ImageEntry {
+        path: path.to_string_lossy().into_owned(),
+        name: name.to_string_lossy().into_owned(),
+        size: meta.len(),
+        modified,
+        created,
+        raw: is_raw,
+    })
+}
+
+/// Lists subdirectories directly inside `dir`, sorted case-insensitively by name.
+pub fn list_directories(dir: &str) -> Result<Vec<DirectoryEntry>, String> {
+    let read = fs::read_dir(dir).map_err(|e| format!("Cannot read {dir}: {e}"))?;
+    let mut out = Vec::new();
+    for entry in read.flatten() {
+        if is_unix_hidden_name(&entry.file_name()) {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        if meta.as_ref().map(|m| !m.is_dir()).unwrap_or(true) {
+            continue;
+        }
+        out.push(DirectoryEntry {
+            path: entry.path().to_string_lossy().into_owned(),
+            name: entry.file_name().to_string_lossy().into_owned(),
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
+const PREVIEW_LIMIT: usize = 4;
+
+/// Collects up to four image previews from `dir`, recursing into subdirectories
+/// while `max_depth` allows (0 = direct children only).
+pub fn directory_preview(dir: &str, max_depth: u32) -> Result<Vec<ImageEntry>, String> {
+    let mut out = Vec::new();
+    collect_preview_entries(Path::new(dir), max_depth, &mut out);
+    Ok(out)
+}
+
+fn collect_preview_entries(dir: &Path, max_depth: u32, out: &mut Vec<ImageEntry>) {
+    if out.len() >= PREVIEW_LIMIT {
+        return;
+    }
+    let read = match fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let mut files = Vec::new();
+    let mut subdirs = Vec::new();
+    for entry in read.flatten() {
+        if is_unix_hidden_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let meta = entry.metadata().ok();
+        if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+            subdirs.push(path);
+        } else if let Some(image) = image_entry_from_path(&path, &entry.file_name()) {
+            files.push(image);
+        }
+    }
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    subdirs.sort_by(|a, b| {
+        a.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+            .cmp(
+                &b.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase(),
+            )
+    });
+
+    for image in files {
+        out.push(image);
+        if out.len() >= PREVIEW_LIMIT {
+            return;
+        }
+    }
+
+    if max_depth == 0 {
+        return;
+    }
+    for sub in subdirs {
+        collect_preview_entries(&sub, max_depth - 1, out);
+        if out.len() >= PREVIEW_LIMIT {
+            return;
+        }
+    }
+}
+
 /// Lists supported image files directly inside `dir`, sorted case-insensitively by name.
 pub fn list_images(dir: &str) -> Result<Vec<ImageEntry>, String> {
     let read = fs::read_dir(dir).map_err(|e| format!("Cannot read {dir}: {e}"))?;
@@ -75,33 +199,9 @@ pub fn list_images(dir: &str) -> Result<Vec<ImageEntry>, String> {
             continue;
         }
         let path = entry.path();
-        let ext = file_ext(&path);
-        let is_raw = is_raw_ext(ext);
-        if !is_jpeg_ext(ext) && !is_raw {
-            continue;
+        if let Some(image) = image_entry_from_path(&path, &entry.file_name()) {
+            out.push(image);
         }
-        let meta = entry.metadata().ok();
-        if meta.as_ref().map(|m| !m.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let modified = meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        let created = meta
-            .as_ref()
-            .and_then(|m| m.created().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        out.push(ImageEntry {
-            path: path.to_string_lossy().into_owned(),
-            name: entry.file_name().to_string_lossy().into_owned(),
-            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
-            modified,
-            created,
-            raw: is_raw,
-        });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
@@ -445,8 +545,10 @@ pub struct ExifField {
 #[serde(rename_all = "camelCase")]
 pub struct ExifOverlay {
     pub lens: Option<String>,
+    pub aperture: Option<String>,
     pub shutter: Option<String>,
     pub iso: Option<String>,
+    pub focus_distance: Option<String>,
 }
 
 /// Full EXIF read for a single file (prefix read, whole file only when needed).
@@ -520,6 +622,70 @@ fn format_iso(exif: &exif::Exif) -> Option<String> {
     None
 }
 
+fn find_field_by_tag<'a>(exif: &'a exif::Exif, tag: exif::Tag) -> Option<&'a exif::Field> {
+    exif.get_field(tag, exif::In::PRIMARY)
+        .or_else(|| exif.fields().find(|f| f.tag == tag))
+}
+
+fn format_f_stop(f: f64) -> String {
+    if !f.is_finite() || f <= 0.0 {
+        return String::new();
+    }
+    let rounded = (f * 10.0).round() / 10.0;
+    if (rounded - rounded.round()).abs() < 0.05 {
+        format!("f/{}", rounded.round() as i64)
+    } else {
+        format!("f/{rounded:.1}")
+    }
+}
+
+fn normalize_f_stop_display(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = trimmed.strip_prefix("f/").or_else(|| trimmed.strip_prefix("F/")) {
+        return format!("f/{rest}");
+    }
+    if trimmed.starts_with('f') || trimmed.starts_with('F') {
+        return trimmed.to_string();
+    }
+    format!("f/{trimmed}")
+}
+
+fn format_aperture(exif: &exif::Exif) -> Option<String> {
+    if let Some(field) = find_field_by_tag(exif, exif::Tag::FNumber) {
+        if let exif::Value::Rational(ref v) = field.value {
+            if let Some(r) = v.first() {
+                if r.denom != 0 {
+                    let formatted = format_f_stop(r.num as f64 / r.denom as f64);
+                    if !formatted.is_empty() {
+                        return Some(formatted);
+                    }
+                }
+            }
+        }
+        let s = normalize_f_stop_display(&field_display(field));
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    if let Some(field) = find_field_by_tag(exif, exif::Tag::ApertureValue) {
+        if let exif::Value::Rational(ref v) = field.value {
+            if let Some(r) = v.first() {
+                if r.denom != 0 {
+                    let av = r.num as f64 / r.denom as f64;
+                    let formatted = format_f_stop(2f64.powf(av / 2.0));
+                    if !formatted.is_empty() {
+                        return Some(formatted);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn format_lens(exif: &exif::Exif) -> Option<String> {
     if let Some(field) = exif.get_field(exif::Tag::LensModel, exif::In::PRIMARY) {
         let s = field_display(&field);
@@ -542,11 +708,93 @@ fn format_lens(exif: &exif::Exif) -> Option<String> {
     }
 }
 
+fn format_distance_meters(m: f64) -> String {
+    if m.is_infinite() {
+        return "∞".to_string();
+    }
+    if !m.is_finite() || m <= 0.0 {
+        return String::new();
+    }
+    if m >= 1_000.0 {
+        format!("{:.0} km", m / 1_000.0)
+    } else if m >= 100.0 {
+        format!("{:.0} m", m)
+    } else if m >= 1.0 {
+        format!("{:.1} m", m)
+    } else if m >= 0.01 {
+        format!("{:.0} cm", m * 100.0)
+    } else {
+        format!("{:.0} mm", m * 1_000.0)
+    }
+}
+
+fn makernote_bytes(field: &exif::Field) -> Option<&[u8]> {
+    match &field.value {
+        exif::Value::Undefined(bytes, _) => Some(bytes),
+        exif::Value::Byte(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+fn format_focus_distance(exif: &exif::Exif) -> Option<String> {
+    if let Some(field) = find_field_by_tag(exif, exif::Tag::SubjectDistance) {
+        if let exif::Value::Rational(ref v) = field.value {
+            if let Some(r) = v.first() {
+                if r.num == 0 {
+                    return None;
+                }
+                if r.num == 0xffff_ffff {
+                    return Some("∞".to_string());
+                }
+                if r.denom != 0 {
+                    let meters = r.num as f64 / r.denom as f64;
+                    if meters > 1_000_000.0 {
+                        return Some("∞".to_string());
+                    }
+                    let formatted = format_distance_meters(meters);
+                    if !formatted.is_empty() {
+                        return Some(formatted);
+                    }
+                }
+            }
+        }
+        let t = field_display(field);
+        let t = t.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("unknown") {
+            return None;
+        }
+        if t.eq_ignore_ascii_case("infinity") {
+            return Some("∞".to_string());
+        }
+        return Some(t.to_string());
+    }
+    if let Some(field) = find_field_by_tag(exif, exif::Tag::SubjectDistanceRange) {
+        let t = field_display(field).trim().to_string();
+        if t.is_empty() || t.eq_ignore_ascii_case("unknown") {
+            return None;
+        }
+        return Some(t);
+    }
+    if let Some(field) = find_field_by_tag(exif, exif::Tag::MakerNote) {
+        if let Some(bytes) = makernote_bytes(field) {
+            if let Some(meters) = crate::makernote::focus_distance_meters(bytes) {
+                let formatted = format_distance_meters(meters);
+                if !formatted.is_empty() {
+                    return Some(formatted);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn build_exif_overlay(exif: &exif::Exif) -> ExifOverlay {
     ExifOverlay {
         lens: format_lens(exif),
+        aperture: format_aperture(exif),
         shutter: format_exposure(exif),
         iso: format_iso(exif),
+        focus_distance: format_focus_distance(exif),
     }
 }
 
@@ -573,4 +821,37 @@ pub fn read_exif_info(path: &str) -> Result<ExifInfo, String> {
         overlay: build_exif_overlay(&exif),
         fields,
     })
+}
+
+#[cfg(test)]
+mod exif_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn format_f_stop_rounds_common_values() {
+        assert_eq!(format_f_stop(2.8), "f/2.8");
+        assert_eq!(format_f_stop(4.0), "f/4");
+        assert_eq!(format_f_stop(5.6), "f/5.6");
+    }
+
+    #[test]
+    fn normalize_f_stop_display_adds_prefix() {
+        assert_eq!(normalize_f_stop_display("2.8"), "f/2.8");
+        assert_eq!(normalize_f_stop_display("f/4"), "f/4");
+        assert_eq!(normalize_f_stop_display("F/5.6"), "f/5.6");
+    }
+
+    #[test]
+    fn apex_converts_to_f_stop() {
+        // AV 6 = f/8 exactly
+        assert_eq!(format_f_stop(2f64.powf(6.0 / 2.0)), "f/8");
+    }
+
+    #[test]
+    fn format_distance_meters_scales_units() {
+        assert_eq!(format_distance_meters(0.45), "45 cm");
+        assert_eq!(format_distance_meters(2.5), "2.5 m");
+        assert_eq!(format_distance_meters(120.0), "120 m");
+        assert_eq!(format_distance_meters(f64::INFINITY), "∞");
+    }
 }

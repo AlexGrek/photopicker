@@ -28,6 +28,9 @@ pub struct Config {
     /// User-curated destination directories that selected photos can be sent to.
     #[serde(default)]
     pub target_directories: Vec<String>,
+    /// Last destination used for copy/move — restored as the chooser highlight.
+    #[serde(default)]
+    pub last_target_directory: Option<String>,
     /// Whether opening the lightbox should drive the app window in/out of fullscreen.
     #[serde(default = "default_lightbox_in_fullscreen")]
     pub lightbox_in_fullscreen: bool,
@@ -47,6 +50,7 @@ impl Default for Config {
             max_recent_directories: 10,
             recent_directories: Vec::new(),
             target_directories: Vec::new(),
+            last_target_directory: None,
             lightbox_in_fullscreen: default_lightbox_in_fullscreen(),
             enable_raw_coupling_detection: default_enable_raw_coupling_detection(),
             exif_overlay_enabled: default_exif_overlay_enabled(),
@@ -103,5 +107,21 @@ impl Config {
     /// Removes `dir` from `target_directories` if present.
     pub fn remove_target_directory(&mut self, dir: &str) {
         self.target_directories.retain(|d| d != dir);
+        if self.last_target_directory.as_deref() == Some(dir) {
+            self.last_target_directory = None;
+        }
+    }
+
+    /// Remembers `dir` as the last copy/move destination.
+    pub fn set_last_target_directory(&mut self, dir: String) {
+        self.last_target_directory = Some(dir);
+    }
+
+    /// Removes `dir` from `recent_directories` if present.
+    pub fn remove_recent_directory(&mut self, dir: &str) {
+        self.recent_directories.retain(|d| d != dir);
+        if self.last_directory.as_deref() == Some(dir) {
+            self.last_directory = self.recent_directories.first().cloned();
+        }
     }
 }

@@ -7,8 +7,10 @@ export interface ExifField {
 
 export interface ExifOverlay {
   lens: string | null;
+  aperture: string | null;
   shutter: string | null;
   iso: string | null;
+  focusDistance: string | null;
 }
 
 export interface ExifInfo {
@@ -21,5 +23,5 @@ export function getExifInfo(path: string): Promise<ExifInfo> {
 }
 
 export function overlayHasData(overlay: ExifOverlay): boolean {
-  return !!(overlay.lens || overlay.shutter || overlay.iso);
+  return !!(overlay.lens || overlay.aperture || overlay.shutter || overlay.iso || overlay.focusDistance);
 }

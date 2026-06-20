@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, FolderInput, FolderPlus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import { type Config } from "@/lib/config";
 import { shortenPath } from "@/lib/utils";
@@ -98,41 +99,41 @@ export function Settings({ onBack }: { onBack: () => void }) {
           <Separator />
 
           <CardContent className="pt-4">
-            <label className="flex items-start gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                className="mt-0.5 h-4 w-4 accent-foreground"
+            <div className="flex items-start gap-3">
+              <Checkbox
+                id="lightbox-fullscreen"
+                className="mt-0.5"
                 checked={lightboxInFullscreen}
                 disabled={savingFullscreenPref}
-                onChange={(e) => toggleLightboxFullscreen(e.target.checked)}
+                onCheckedChange={(checked) => toggleLightboxFullscreen(checked === true)}
               />
-              <span className="text-sm leading-5">
+              <label htmlFor="lightbox-fullscreen" className="text-sm leading-5 cursor-pointer">
                 Enter fullscreen when opening the lightbox
-              </span>
-            </label>
-            <label className="mt-3 flex items-start gap-3 opacity-60 cursor-not-allowed" title="Coming soon">
-              <input type="checkbox" className="mt-0.5 h-4 w-4 accent-foreground" checked={false} disabled />
-              <span className="text-sm leading-5">
+              </label>
+            </div>
+            <div className="mt-3 flex items-start gap-3 opacity-60" title="Coming soon">
+              <Checkbox id="load-full-raw" className="mt-0.5" checked={false} disabled />
+              <label htmlFor="load-full-raw" className="text-sm leading-5 cursor-not-allowed">
                 Load full RAW
                 <span className="block text-xs text-muted-foreground">Coming soon (embedded previews only for now)</span>
-              </span>
-            </label>
-            <label className="mt-3 flex items-start gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                className="mt-0.5 h-4 w-4 accent-foreground"
+              </label>
+            </div>
+            <div className="flex items-start gap-3 mt-3">
+              <Checkbox
+                id="raw-coupling"
+                className="mt-0.5"
                 checked={enableRawCouplingDetection}
                 disabled={savingRawCouplingPref}
-                onChange={(e) => toggleRawCouplingDetection(e.target.checked)}
+                onCheckedChange={(checked) => toggleRawCouplingDetection(checked === true)}
               />
-              <span className="text-sm leading-5">
+              <label htmlFor="raw-coupling" className="text-sm leading-5 cursor-pointer">
                 Enable raw coupling detection
                 <span className="block text-xs text-muted-foreground">
                   When a JPG and RAW share the same base name, the gallery shows only the JPG while copy, move, and
                   delete actions affect both files.
                 </span>
-              </span>
-            </label>
+              </label>
+            </div>
           </CardContent>
         </Card>
 

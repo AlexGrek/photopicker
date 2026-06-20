@@ -100,6 +100,11 @@ export default function App() {
         dir={view.dir}
         initialFile={view.openFile}
         onBack={() => setView({ kind: "menu" })}
+        onRemoveUnreachable={async () => {
+          const cfg = await invoke<Config>("remove_recent_directory", { dir: view.dir });
+          setRecentDirs(cfg.recentDirectories);
+          setView({ kind: "menu" });
+        }}
       />
     );
   }

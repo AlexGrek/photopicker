@@ -20,10 +20,11 @@ import {
   X,
 } from "lucide-react";
 import { origUrl, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
+import { prefersReducedMotion } from "@/lib/photoScroll";
 import { getExifInfo, overlayHasData, type ExifInfo, type ExifOverlay } from "@/lib/exif";
 import { useGamepad } from "@/lib/gamepad";
 import { shortenPath } from "@/lib/utils";
-import { type Config } from "@/lib/config";
+import { type Config, menuIndexForConfig, persistLastTargetDirectory } from "@/lib/config";
 import { EMPTY_MARK, copyToTarget, deleteFile, getMarks, moveToTarget, rotateImage, setMark, type Mark } from "@/lib/marks";
 
 /** How close to an edge (px) the cursor must be to reveal that edge's controls. */
@@ -55,15 +56,26 @@ export function Lightbox({
   index,
   onIndex,
   onClose,
+  onAnimateClose,
   onRemoved,
   onEntryUpdated,
   actionPathsByPath,
+  selectionMode = false,
+  selectedPaths,
+  onToggleSelected,
 }: {
   dir: string;
   entries: ImageEntry[];
   index: number;
   onIndex: (i: number) => void;
   onClose: () => void;
+  /** When set, close runs scroll + shrink-back instead of an instant dismiss. */
+  onAnimateClose?: (info: {
+    path: string;
+    index: number;
+    getSourceRect: () => DOMRect | null;
+    imageSrc: string;
+  }) => Promise<void>;
   /** Called with photo paths after they leave the directory (moved or deleted),
    *  so the host can drop that tile from the grid. */
   onRemoved: (paths: string[]) => void;
@@ -71,8 +83,13 @@ export function Lightbox({
   onEntryUpdated: (path: string, modified: number | null) => void;
   /** Optional action override (e.g. RAW coupling) keyed by visible entry path. */
   actionPathsByPath: Record<string, string[]>;
+  /** Gallery selection mode — shows a select toggle in the toolbar. */
+  selectionMode?: boolean;
+  selectedPaths?: ReadonlySet<string>;
+  onToggleSelected?: (path: string) => void;
 }) {
   const entry = entries[index];
+  const isSelected = selectedPaths?.has(entry.path) ?? false;
 
   const [marks, setMarks] = useState<Record<string, Mark>>({});
   const [targets, setTargets] = useState<string[]>([]);
@@ -90,11 +107,55 @@ export function Lightbox({
   const [exifLoading, setExifLoading] = useState(false);
   const [exifOverlayEnabled, setExifOverlayEnabled] = useState(false);
   const [savingExifOverlay, setSavingExifOverlay] = useState(false);
+  const [exiting, setExiting] = useState(false);
+  const closingRef = useRef(false);
 
   const mark = marks[entry.name] ?? EMPTY_MARK;
-  const showToolbar = toolbarShown || menuMode !== null || confirmingDelete || exifModalOpen;
+  const showToolbar = !exiting && (toolbarShown || menuMode !== null || confirmingDelete || exifModalOpen);
   const rotateNonce = rotateNonceByPath[entry.path] ?? 0;
-  const showInfo = infoFlash || toolbarShown;
+  const showInfo = !exiting && (infoFlash || toolbarShown);
+
+  function getActiveImageRect(): DOMRect | null {
+    const slide = document.querySelector(".ph-lb-slide-active");
+    if (!slide) return null;
+    const full = slide.querySelector(".ph-lb-full") as HTMLImageElement | null;
+    const placeholder = slide.querySelector(".ph-lb-placeholder") as HTMLImageElement | null;
+    const img = full && full.naturalWidth > 0 ? full : (placeholder ?? full);
+    return img?.getBoundingClientRect() ?? null;
+  }
+
+  async function handleClose() {
+    if (closingRef.current || exiting) return;
+    closingRef.current = true;
+    try {
+      if (onAnimateClose && !prefersReducedMotion()) {
+        setExiting(true);
+        setMenuMode(null);
+        setConfirmingDelete(false);
+        setExifModalOpen(false);
+
+        if (lightboxInFullscreen) {
+          try {
+            await getCurrentWindow().setFullscreen(false);
+          } catch {
+            /* still animate back to the tile */
+          }
+        }
+
+        const imageSrc = `${thumbUrl(entry, 512)}&r=${rotateNonce}`;
+        await onAnimateClose({
+          path: entry.path,
+          index,
+          getSourceRect: getActiveImageRect,
+          imageSrc,
+        });
+        return;
+      }
+      onClose();
+    } finally {
+      closingRef.current = false;
+    }
+  }
 
   // Load this directory's saved marks + the configured copy targets.
   useEffect(() => {
@@ -107,6 +168,7 @@ export function Lightbox({
       (cfg) => {
         if (!alive) return;
         setTargets(cfg.targetDirectories);
+        setMenuIndex(menuIndexForConfig(cfg));
         setLightboxInFullscreen(cfg.lightboxInFullscreen);
         setExifOverlayEnabled(cfg.exifOverlayEnabled);
       },
@@ -242,9 +304,11 @@ export function Lightbox({
   }
   const setRating = (r: number) => applyMark({ ...mark, rating: mark.rating === r ? 0 : r });
   const toggleFlag = () => applyMark({ ...mark, flag: !mark.flag });
+  const toggleSelected = () => onToggleSelected?.(entry.path);
 
   async function sendTo(target: string, mode: SendMode) {
     setMenuMode(null);
+    persistLastTargetDirectory(target);
     const acted = entry; // the photo at action time — frozen across the await
     const actedPaths = actionPathsFor(acted);
     const dest = shortenPath(target);
@@ -276,8 +340,11 @@ export function Lightbox({
   const itemCount = targets.length + 1;
   const selIndex = Math.min(menuIndex, itemCount - 1);
 
-  const cycleMenu = (delta: number) =>
-    setMenuIndex((i) => (((i + delta) % itemCount) + itemCount) % itemCount);
+  const cycleMenu = (delta: number) => {
+    const next = (((menuIndex + delta) % itemCount) + itemCount) % itemCount;
+    setMenuIndex(next);
+    if (next < targets.length) persistLastTargetDirectory(targets[next]);
+  };
 
   // "Browse…" — pick any folder via the native dialog, then send there.
   async function browseAndSend(mode: SendMode) {
@@ -354,13 +421,14 @@ export function Lightbox({
         }
       } else if (e.key === "Escape") {
         // Escape backs out of a pending delete confirmation before closing.
-        return confirmingDelete ? setConfirmingDelete(false) : onClose();
+        return confirmingDelete ? setConfirmingDelete(false) : void handleClose();
       }
       if (e.key === "ArrowLeft") return goPrev();
       if (e.key === "ArrowRight") return goNext();
       if (k === "c") return requestSend("copy");
       if (k === "m") return requestSend("move");
       if (k === "f") return toggleFlag();
+      if (selectionMode && k === "s") return toggleSelected();
       if (k === "0") return applyMark({ ...mark, rating: 0 });
       if (k >= "1" && k <= "5") return setRating(Number(k));
     };
@@ -376,6 +444,7 @@ export function Lightbox({
     }
     // Y mirrors the C key everywhere (open the copy chooser / confirm a copy).
     if (button === "y") return requestSend("copy");
+    if (selectionMode && button === "x") return toggleSelected();
     if (button === "lb") return void rotateCurrent(false);
     if (button === "rb") return void rotateCurrent(true);
     // In the chooser, the d-pad cycles destinations, A confirms, B cancels.
@@ -388,14 +457,14 @@ export function Lightbox({
     }
     if (button === "left" || button === "up") goPrev();
     else if (button === "right" || button === "down") goNext();
-    else if (button === "b") onClose();
+    else if (button === "b") void handleClose();
   });
 
   // Keep the current photo and its neighbours mounted so prev/next stay decoded.
   const window_ = [index - 1, index, index + 1].filter((i) => i >= 0 && i < entries.length);
 
   return (
-    <div className="ph-lightbox">
+    <div className={`ph-lightbox${exiting ? " ph-lightbox-exiting" : ""}`}>
       {window_.map((i) => (
         <Slide
           key={entries[i].path}
@@ -406,16 +475,18 @@ export function Lightbox({
         />
       ))}
 
-      <button
-        type="button"
-        className={`ph-lb-close${edges.top ? "" : " ph-lb-chrome-hidden"}`}
-        onClick={onClose}
-        aria-label="Close"
-      >
-        <X className="h-5 w-5" />
-      </button>
+      {!exiting && (
+        <button
+          type="button"
+          className={`ph-lb-close${edges.top ? "" : " ph-lb-chrome-hidden"}`}
+          onClick={() => void handleClose()}
+          aria-label="Close"
+        >
+          <X className="h-5 w-5" />
+        </button>
+      )}
 
-      {hasPrev && (
+      {!exiting && hasPrev && (
         <button
           type="button"
           className={`ph-lb-nav ph-lb-prev${edges.left ? "" : " ph-lb-chrome-hidden"}`}
@@ -425,7 +496,7 @@ export function Lightbox({
           <ChevronLeft className="h-7 w-7" />
         </button>
       )}
-      {hasNext && (
+      {!exiting && hasNext && (
         <button
           type="button"
           className={`ph-lb-nav ph-lb-next${edges.right ? "" : " ph-lb-chrome-hidden"}`}
@@ -436,16 +507,18 @@ export function Lightbox({
         </button>
       )}
 
-      <div className={`ph-lb-bar${showInfo ? "" : " ph-lb-bar-hidden"}`}>
-        <span className="ph-lb-count">
-          {index + 1} / {entries.length}
-        </span>
-        <span className="ph-lb-name">{entry.name}</span>
-      </div>
+      {!exiting && (
+        <div className={`ph-lb-bar${showInfo ? "" : " ph-lb-bar-hidden"}`}>
+          <span className="ph-lb-count">
+            {index + 1} / {entries.length}
+          </span>
+          <span className="ph-lb-name">{entry.name}</span>
+        </div>
+      )}
 
-      {status && <div className="ph-lb-status">{status}</div>}
+      {!exiting && status && <div className="ph-lb-status">{status}</div>}
 
-      {exifModalOpen && (
+      {!exiting && exifModalOpen && (
         <div className="ph-lb-exif-backdrop" onClick={() => setExifModalOpen(false)}>
           <div className="ph-lb-exif-panel" onClick={(e) => e.stopPropagation()}>
             <div className="ph-lb-exif-header">
@@ -496,7 +569,7 @@ export function Lightbox({
         </div>
       )}
 
-      {menuMode && (
+      {!exiting && menuMode && (
         <div className="ph-lb-menu-backdrop" onClick={() => setMenuMode(null)}>
           <div className="ph-lb-menu" onClick={(e) => e.stopPropagation()}>
             <div className="ph-lb-menu-title">{menuMode === "copy" ? "Copy to…" : "Move to…"}</div>
@@ -529,12 +602,33 @@ export function Lightbox({
         </div>
       )}
 
-      <div className={`ph-lb-toolbar${showToolbar ? "" : " ph-lb-toolbar-hidden"}`}>
+      {!exiting && (
+        <div className={`ph-lb-toolbar${showToolbar ? "" : " ph-lb-toolbar-hidden"}`}>
         <button type="button" className="ph-lb-tbtn" onClick={goPrev} disabled={!hasPrev} title="Previous (←)">
           <ChevronLeft className="h-5 w-5" />
         </button>
 
         <span className="ph-lb-tsep" />
+
+        {selectionMode && (
+          <>
+            <button
+              type="button"
+              className={`ph-lb-tbtn ph-lb-select${isSelected ? " ph-lb-tbtn-on" : ""}`}
+              onClick={toggleSelected}
+              title={isSelected ? "Deselect (S)" : "Select (S)"}
+              aria-pressed={isSelected}
+              aria-label={isSelected ? "Deselect photo" : "Select photo"}
+            >
+              <span className={`ph-lb-select-box${isSelected ? " ph-lb-select-box-on" : ""}`} aria-hidden>
+                {isSelected && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
+              </span>
+              <span>{isSelected ? "Selected" : "Select"}</span>
+              <kbd>S</kbd>
+            </button>
+            <span className="ph-lb-tsep" />
+          </>
+        )}
 
         <button type="button" className="ph-lb-tbtn" onClick={() => requestSend("copy")} title="Copy to target location">
           <Copy className="h-4 w-4" />
@@ -647,7 +741,8 @@ export function Lightbox({
         <button type="button" className="ph-lb-tbtn" onClick={goNext} disabled={!hasNext} title="Next (→)">
           <ChevronRight className="h-5 w-5" />
         </button>
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -851,8 +946,12 @@ function Slide({
       {active && overlay && overlayHasData(overlay) && (
         <div className="ph-lb-exif-overlay" aria-hidden>
           {overlay.lens && <span>{overlay.lens}</span>}
-          {(overlay.shutter || overlay.iso) && (
-            <span>{[overlay.shutter, overlay.iso].filter(Boolean).join(" · ")}</span>
+          {(overlay.aperture || overlay.shutter || overlay.iso || overlay.focusDistance) && (
+            <span>
+              {[overlay.aperture, overlay.shutter, overlay.iso, overlay.focusDistance]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>
           )}
         </div>
       )}
