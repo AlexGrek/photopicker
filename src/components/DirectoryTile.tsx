@@ -42,14 +42,20 @@ function DirectoryPreviewGrid({
       {slots.map((preview, i) => (
         <div key={i} className="ph-dir-preview-cell">
           {preview ? (
-            <img
-              src={thumbUrl(preview, 128)}
-              alt=""
-              className="ph-dir-preview-img"
-              loading="lazy"
-              decoding="async"
-              draggable={false}
-            />
+            preview.video ? (
+              <span className="ph-dir-preview-img ph-dir-preview-video" aria-hidden>
+                <Film className="h-4 w-4" />
+              </span>
+            ) : (
+              <img
+                src={thumbUrl(preview, 128)}
+                alt=""
+                className="ph-dir-preview-img"
+                loading="lazy"
+                decoding="async"
+                draggable={false}
+              />
+            )
           ) : previews !== null ? (
             <span className="ph-dir-preview-blank" />
           ) : (

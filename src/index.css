@@ -1259,6 +1259,14 @@ button.ph-gallery-list-row {
   display: block;
 }
 
+.ph-dir-preview-video {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
 .ph-dir-preview-blank {
   display: block;
   width: 100%;
