@@ -64,6 +64,8 @@ pub struct ImageEntry {
     pub created: Option<u64>,
     /// Whether this file is a RAW photo (currently preview-only via embedded JPEG).
     pub raw: bool,
+    /// Whether this file is a video (thumbnail generated client-side; played natively).
+    pub video: bool,
 }
 
 #[derive(Clone)]
@@ -77,7 +79,8 @@ struct ShotDateCandidate {
 fn image_entry_from_path(path: &Path, name: &std::ffi::OsStr) -> Option<ImageEntry> {
     let ext = file_ext(path);
     let is_raw = is_raw_ext(ext);
-    if !is_jpeg_ext(ext) && !is_raw {
+    let is_video = is_video_ext(ext);
+    if !is_jpeg_ext(ext) && !is_raw && !is_video {
         return None;
     }
     let meta = path.metadata().ok()?;
@@ -101,6 +104,7 @@ fn image_entry_from_path(path: &Path, name: &std::ffi::OsStr) -> Option<ImageEnt
         modified,
         created,
         raw: is_raw,
+        video: is_video,
     })
 }
 
@@ -224,6 +228,14 @@ fn is_raw_ext(ext: Option<&str>) -> bool {
     matches!(ext.map(str::to_ascii_lowercase).as_deref(), Some("arw" | "raf"))
 }
 
+fn is_video_ext(ext: Option<&str>) -> bool {
+    matches!(ext.map(str::to_ascii_lowercase).as_deref(), Some("mp4" | "m4v" | "mov"))
+}
+
+fn is_video_path(path: &Path) -> bool {
+    is_video_ext(file_ext(path))
+}
+
 fn is_raw_path(path: &Path) -> bool {
     is_raw_ext(file_ext(path))
 }
@@ -287,6 +299,11 @@ pub fn list_shot_dates(dir: &str, raw_coupling: bool) -> Result<HashMap<String, 
 /// `max_edge` pixels. Returns the encoded JPEG bytes ready to serve to the webview.
 pub fn render_thumbnail(path: &str, max_edge: u32) -> Result<Vec<u8>, String> {
     let path_obj = PathBuf::from(path);
+    if is_video_path(&path_obj) {
+        // Videos have their poster frame generated client-side (the webview's native
+        // decoder), never here — Rust carries no video codec. This is just a guard.
+        return Err("video thumbnails are generated client-side".into());
+    }
     let total_len = fs::metadata(path).map_err(|e| e.to_string())?.len();
     let prefix = read_prefix(path, PREFIX_CAP.min(total_len.max(1)))?;
     let raw_file = is_raw_path(&path_obj);

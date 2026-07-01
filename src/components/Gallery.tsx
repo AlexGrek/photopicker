@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { VirtuosoMasonry } from "@virtuoso.dev/masonry";
-import { ArrowLeft, CalendarDays, Check, ChevronLeft, ChevronRight, ChevronDown, Ellipsis, Flag, ImageOff, SlidersHorizontal, SquareCheck, Star, X } from "lucide-react";
+import { ArrowLeft, CalendarDays, Check, ChevronLeft, ChevronRight, ChevronDown, Ellipsis, Film, Flag, ImageOff, Play, SlidersHorizontal, SquareCheck, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { listImages, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import {
@@ -15,6 +15,7 @@ import {
 import { type Config } from "@/lib/config";
 import { EMPTY_MARK, clearFlags, clearStars, getMarks, writeStarsToExif, type Mark } from "@/lib/marks";
 import { BrowserTile, type BrowserTileContext } from "./BrowserTile";
+import { VideoThumb } from "./VideoThumb";
 import { DirectoryListRow } from "./DirectoryTile";
 import { Lightbox } from "./Lightbox";
 import { GallerySelectionBar } from "./GallerySelectionBar";
@@ -41,6 +42,30 @@ function useColumnCount(): number {
 }
 
 const TileItem = BrowserTile;
+
+/** List-row thumbnail: a `thumb://` image for photos, a client poster + ▶ badge for videos. */
+function ListThumb({ entry }: { entry: ImageEntry }) {
+  if (entry.video) {
+    return (
+      <span className="ph-gallery-list-thumb ph-gallery-list-thumb-video">
+        <VideoThumb entry={entry} className="ph-media-fill" />
+        <span className="ph-tile-video-badge ph-video-badge-sm" aria-hidden>
+          <Play className="h-3 w-3" fill="currentColor" />
+        </span>
+      </span>
+    );
+  }
+  return (
+    <img
+      src={thumbUrl(entry, 128)}
+      alt={entry.name}
+      className="ph-gallery-list-thumb"
+      loading="lazy"
+      decoding="async"
+      draggable={false}
+    />
+  );
+}
 type ViewMode = "masonry" | "grid" | "list";
 type SortMode = "nameAsc" | "nameDesc" | "createdDesc" | "createdAsc" | "shotDesc" | "shotAsc";
 const SORT_LABEL: Record<SortMode, string> = {
@@ -104,6 +129,31 @@ function monthKey(d: Date): string {
 
 function timestampForFilter(entry: ImageEntry): number | null {
   return entry.created ?? entry.modified ?? null;
+}
+
+/** Converts an EXIF shot-date key (YYYYMMDDhhmmss) into a comparable local epoch (ms). */
+function shotKeyToEpoch(key: number): number {
+  const s = String(key).padStart(14, "0");
+  const y = Number(s.slice(0, 4));
+  const mo = Number(s.slice(4, 6));
+  const d = Number(s.slice(6, 8));
+  const h = Number(s.slice(8, 10));
+  const mi = Number(s.slice(10, 12));
+  const se = Number(s.slice(12, 14));
+  return new Date(y, (mo || 1) - 1, d || 1, h, mi, se).getTime();
+}
+
+/**
+ * A single, comparable timestamp (epoch ms) for the shot-date sort. Photos use their
+ * EXIF shot date when available; videos (which carry no EXIF) fall back to the file's
+ * creation time so they interleave organically with photos rather than clumping.
+ * Returns -1 when nothing is known, matching the "unknown sorts last/first" behaviour.
+ */
+function shotSortValue(entry: ImageEntry, shotDateByPath: Record<string, number>): number {
+  const key = shotDateByPath[entry.path];
+  if (key != null) return shotKeyToEpoch(key);
+  if (entry.video) return entry.created ?? entry.modified ?? -1;
+  return -1;
 }
 
 function stemKey(name: string): string {
@@ -390,8 +440,8 @@ export function Gallery({
     const sorted = [...filtered];
     sorted.sort((a, b) => {
       if (sortMode === "shotDesc" || sortMode === "shotAsc") {
-        const aShot = shotDateByPath[a.path] ?? -1;
-        const bShot = shotDateByPath[b.path] ?? -1;
+        const aShot = shotSortValue(a, shotDateByPath);
+        const bShot = shotSortValue(b, shotDateByPath);
         if (sortMode === "shotDesc") {
           return bShot - aShot || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
         }
@@ -1146,14 +1196,7 @@ export function Gallery({
                       <span className={`ph-list-check${selected ? " ph-list-check-on" : ""}`} aria-hidden>
                         {selected && <Check className="h-3.5 w-3.5" strokeWidth={3} />}
                       </span>
-                      <img
-                        src={thumbUrl(entry, 128)}
-                        alt={entry.name}
-                        className="ph-gallery-list-thumb"
-                        loading="lazy"
-                        decoding="async"
-                        draggable={false}
-                      />
+                      <ListThumb entry={entry} />
                       <span className="ph-gallery-list-text">
                         <span className="ph-gallery-list-name">{entry.name}</span>
                         <span className="ph-gallery-list-date">{formatCreated(entry)}</span>
@@ -1176,14 +1219,7 @@ export function Gallery({
                     onClick={() => setOpenIndex(i)}
                     title={entry.name}
                   >
-                    <img
-                      src={thumbUrl(entry, 128)}
-                      alt={entry.name}
-                      className="ph-gallery-list-thumb"
-                      loading="lazy"
-                      decoding="async"
-                      draggable={false}
-                    />
+                    <ListThumb entry={entry} />
                     <span className="ph-gallery-list-text">
                       <span className="ph-gallery-list-name">{entry.name}</span>
                       <span className="ph-gallery-list-date">{formatCreated(entry)}</span>
@@ -1296,14 +1332,20 @@ export function Gallery({
                         }}
                         title={`${row.count} photo${row.count === 1 ? "" : "s"}`}
                       >
-                        <img
-                          src={thumbUrl(row.preview, 96)}
-                          alt={row.preview.name}
-                          className="ph-date-day-row-thumb"
-                          loading="lazy"
-                          decoding="async"
-                          draggable={false}
-                        />
+                        {row.preview.video ? (
+                          <span className="ph-date-day-row-thumb ph-date-day-row-thumb-video" aria-hidden>
+                            <Film className="h-4 w-4" />
+                          </span>
+                        ) : (
+                          <img
+                            src={thumbUrl(row.preview, 96)}
+                            alt={row.preview.name}
+                            className="ph-date-day-row-thumb"
+                            loading="lazy"
+                            decoding="async"
+                            draggable={false}
+                          />
+                        )}
                         <span className="ph-date-day-row-text">
                           <span className="ph-date-day-row-date">{DAY_LABEL_FORMAT.format(dateFromDayKey(row.day))}</span>
                           <span className="ph-date-day-row-count">

@@ -30,6 +30,12 @@
         "name": "JPEG Image",
         "description": "JPEG image",
         "role": "Viewer"
+      },
+      {
+        "ext": ["mp4", "mov", "m4v"],
+        "name": "Video",
+        "description": "Video file",
+        "role": "Viewer"
       }
     ],
     "icon": [

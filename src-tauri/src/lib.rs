@@ -532,6 +532,110 @@ fn handle_thumb_request(
     });
 }
 
+/// Maps a video file's extension to a MIME type the webview's media element understands.
+fn video_content_type(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("mov") => "video/quicktime",
+        Some("m4v") => "video/x-m4v",
+        _ => "video/mp4",
+    }
+}
+
+/// Parses an HTTP `Range: bytes=start-end` header into an inclusive `(start, end)` byte
+/// range clamped to `total`. Only a single range is supported (the common media case).
+/// Returns `None` when there is no (usable) range, so the caller serves the whole file.
+fn parse_range(request: &Request<Vec<u8>>, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let value = request.headers().get("range")?.to_str().ok()?;
+    let spec = value.trim().strip_prefix("bytes=")?;
+    // Ignore multi-range requests — reply with the first (or whole file if unparsable).
+    let spec = spec.split(',').next()?.trim();
+    let (start_s, end_s) = spec.split_once('-')?;
+    let last = total - 1;
+    let (start, end) = if start_s.is_empty() {
+        // Suffix range: bytes=-N → the final N bytes.
+        let n: u64 = end_s.parse().ok()?;
+        if n == 0 {
+            return None;
+        }
+        (total.saturating_sub(n), last)
+    } else {
+        let start: u64 = start_s.parse().ok()?;
+        let end = if end_s.is_empty() { last } else { end_s.parse::<u64>().ok()?.min(last) };
+        (start, end)
+    };
+    if start > end || start > last {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Reads `[start, end]` (inclusive) bytes from `path` without loading the whole file.
+fn read_file_range(path: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let len = (end - start + 1) as usize;
+    let mut buf = vec![0u8; len];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Handles one `video://` request: streams the video with HTTP Range support so the
+/// webview's `<video>` element can seek without downloading the whole (potentially huge)
+/// file. Replies `206 Partial Content` for a ranged request, `200` for the whole file.
+fn handle_video_request(request: Request<Vec<u8>>, responder: UriSchemeResponder) {
+    tauri::async_runtime::spawn(async move {
+        let Some(path) = decode_request_path(&request) else {
+            responder.respond(error_response(400));
+            return;
+        };
+        let content_type = video_content_type(&path);
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let total = std::fs::metadata(&path)?.len();
+            let range = parse_range(&request, total);
+            match range {
+                Some((start, end)) => {
+                    let bytes = read_file_range(&path, start, end)?;
+                    Ok::<_, std::io::Error>((bytes, Some((start, end)), total))
+                }
+                None => {
+                    let bytes = std::fs::read(&path)?;
+                    Ok((bytes, None, total))
+                }
+            }
+        })
+        .await;
+
+        let response = match result {
+            Ok(Ok((bytes, range, total))) => {
+                let mut builder = Response::builder()
+                    .header("Content-Type", content_type)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Accept-Ranges", "bytes")
+                    .header("Cache-Control", "no-store")
+                    .header("Content-Length", bytes.len().to_string());
+                builder = match range {
+                    Some((start, end)) => builder
+                        .status(206)
+                        .header("Content-Range", format!("bytes {start}-{end}/{total}")),
+                    None => builder.status(200),
+                };
+                builder.body(bytes).unwrap()
+            }
+            _ => error_response(404),
+        };
+        responder.respond(response);
+    });
+}
+
 /// Handles one `orig://` request: streams the original file's bytes verbatim so the
 /// webview decodes the full-resolution image itself. Used by the lightbox, where the
 /// user has explicitly chosen to view the full photo (not a fast preview).
@@ -579,6 +683,9 @@ pub fn run() {
         })
         .register_asynchronous_uri_scheme_protocol("orig", |_ctx, request, responder| {
             handle_orig_request(request, responder);
+        })
+        .register_asynchronous_uri_scheme_protocol("video", |_ctx, request, responder| {
+            handle_video_request(request, responder);
         })
         .invoke_handler(tauri::generate_handler![
             greet,

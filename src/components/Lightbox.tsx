@@ -19,7 +19,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { origUrl, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
+import { origUrl, thumbUrl, videoUrl, type ImageEntry } from "@/lib/thumbnails";
 import { prefersReducedMotion } from "@/lib/photoScroll";
 import { getExifInfo, overlayHasData, type ExifInfo, type ExifOverlay } from "@/lib/exif";
 import { useGamepad } from "@/lib/gamepad";
@@ -131,7 +131,7 @@ export function Lightbox({
     if (closingRef.current || exiting) return;
     closingRef.current = true;
     try {
-      if (onAnimateClose && !prefersReducedMotion()) {
+      if (onAnimateClose && !prefersReducedMotion() && !entry.video) {
         setExiting(true);
         setMenuMode(null);
         setConfirmingDelete(false);
@@ -286,7 +286,7 @@ export function Lightbox({
   const goPrev = () => hasPrev && onIndex(index - 1);
   const goNext = () => hasNext && onIndex(index + 1);
   const actionPathsFor = (e: ImageEntry) => actionPathsByPath[e.path] ?? [e.path];
-  const canRotate = !entry.raw;
+  const canRotate = !entry.raw && !entry.video;
 
   async function rotateCurrent(clockwise: boolean) {
     if (!canRotate) return;
@@ -476,7 +476,7 @@ export function Lightbox({
           entry={entries[i]}
           active={i === index}
           nonce={rotateNonceByPath[entries[i].path] ?? 0}
-          overlay={exifOverlayEnabled && i === index ? exifInfo?.overlay ?? null : null}
+          overlay={exifOverlayEnabled && i === index && !entries[i].video ? exifInfo?.overlay ?? null : null}
         />
       ))}
 
@@ -871,6 +871,28 @@ function Slide({
 
   const zoomed = scale > 1.01;
   const dragging = dragState !== null;
+
+  // Videos play natively with the webview's media element (with built-in controls).
+  // Only the active slide mounts the <video> so neighbours don't preload/autoplay.
+  if (entry.video) {
+    return (
+      <div
+        className={`ph-lb-slide${active ? " ph-lb-slide-active" : ""}`}
+        aria-hidden={!active}
+      >
+        {active && (
+          <video
+            key={entry.path}
+            className="ph-lb-video"
+            src={videoUrl(entry)}
+            controls
+            autoPlay
+            playsInline
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div

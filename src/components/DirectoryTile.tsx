@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Folder } from "lucide-react";
+import { Check, Film, Folder } from "lucide-react";
 import { directoryPreview } from "@/lib/browse";
 import { thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import { photoPathAttr } from "@/lib/photoScroll";

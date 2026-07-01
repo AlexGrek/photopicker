@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Check, ImageOff } from "lucide-react";
+import { Check, ImageOff, Play } from "lucide-react";
 import { thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import { photoPathAttr } from "@/lib/photoScroll";
+import { VideoThumb } from "./VideoThumb";
 
 /** Shared data the masonry passes to every tile. */
 export interface TileContext {
@@ -57,30 +58,41 @@ export function PhotoTile({
           aria-label={selected ? `${data.name} (selected)` : data.name}
           aria-pressed={context.selectionMode ? selected : undefined}
         >
-          {status !== "error" && (
-            <img
-              src={thumbUrl(data, 256)}
-              alt={data.name}
-              className="ph-tile-img"
-              loading="lazy"
-              decoding="async"
-              draggable={false}
-              style={{ opacity: status === "loaded" ? 1 : 0 }}
-              onLoad={(e) => {
-                const img = e.currentTarget;
-                if (!isGrid && img.naturalWidth > 0 && img.naturalHeight > 0) {
-                  setAspectRatio(`${img.naturalWidth} / ${img.naturalHeight}`);
-                }
-                setStatus("loaded");
-              }}
-              onError={() => setStatus("error")}
-            />
+          {data.video ? (
+            <VideoThumb entry={data} onAspect={isGrid ? undefined : setAspectRatio} />
+          ) : (
+            <>
+              {status !== "error" && (
+                <img
+                  src={thumbUrl(data, 256)}
+                  alt={data.name}
+                  className="ph-tile-img"
+                  loading="lazy"
+                  decoding="async"
+                  draggable={false}
+                  style={{ opacity: status === "loaded" ? 1 : 0 }}
+                  onLoad={(e) => {
+                    const img = e.currentTarget;
+                    if (!isGrid && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                      setAspectRatio(`${img.naturalWidth} / ${img.naturalHeight}`);
+                    }
+                    setStatus("loaded");
+                  }}
+                  onError={() => setStatus("error")}
+                />
+              )}
+              {status === "loading" && <div className="ph-tile-state ph-tile-skeleton" />}
+              {status === "error" && (
+                <div className="ph-tile-state ph-tile-failed">
+                  <ImageOff className="h-5 w-5" />
+                </div>
+              )}
+            </>
           )}
-          {status === "loading" && <div className="ph-tile-state ph-tile-skeleton" />}
-          {status === "error" && (
-            <div className="ph-tile-state ph-tile-failed">
-              <ImageOff className="h-5 w-5" />
-            </div>
+          {data.video && (
+            <span className="ph-tile-video-badge" aria-hidden>
+              <Play className="h-4 w-4" fill="currentColor" />
+            </span>
           )}
         </button>
         {showSelection && (

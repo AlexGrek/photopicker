@@ -11,6 +11,8 @@ export interface ImageEntry {
   modified: number | null;
   /** True for RAW files (currently embedded preview only). */
   raw: boolean;
+  /** True for video files (poster generated client-side; played natively). */
+  video: boolean;
 }
 
 /** Lists the JPEGs in `dir`. Cheap — reads directory metadata, no file contents. */
@@ -41,4 +43,15 @@ export function thumbUrl(entry: ImageEntry, maxEdge: number): string {
  */
 export function origUrl(entry: ImageEntry): string {
   return convertFileSrc(entry.path, "orig");
+}
+
+/**
+ * Builds a `video://` URL that streams a video file with HTTP Range support, so a
+ * `<video>` element can seek without downloading the whole (potentially huge) file.
+ * Used by the lightbox for playback and by the client-side poster-frame generator.
+ */
+export function videoUrl(entry: ImageEntry): string {
+  const base = convertFileSrc(entry.path, "video");
+  const version = entry.modified != null ? `?v=${entry.modified}` : "";
+  return `${base}${version}`;
 }
