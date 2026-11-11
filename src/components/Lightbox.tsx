@@ -1,7 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   Camera,
   Check,
@@ -9,9 +7,7 @@ import {
   ChevronRight,
   Copy,
   Flag,
-  FolderInput,
   FolderOutput,
-  FolderSearch,
   Loader2,
   RotateCcw,
   RotateCw,
@@ -23,14 +19,27 @@ import { origUrl, thumbUrl, videoUrl, type ImageEntry } from "@/lib/thumbnails";
 import { prefersReducedMotion } from "@/lib/photoScroll";
 import { getExifInfo, overlayHasData, type ExifInfo, type ExifOverlay } from "@/lib/exif";
 import { useGamepad } from "@/lib/gamepad";
-import { shortenPath } from "@/lib/utils";
-import { type Config, menuIndexForConfig, persistLastTargetDirectory } from "@/lib/config";
+import { hasCommandModifier, useWindowKeydown } from "@/lib/hooks";
+import { lockPageScroll } from "@/lib/scrollLock";
+import { baseName, plural, shortenPath } from "@/lib/utils";
+import { updateConfig, useConfig } from "@/lib/config";
 import { EMPTY_MARK, copyToTarget, deleteFile, getMarks, moveToTarget, rotateImage, setMark, type Mark } from "@/lib/marks";
+import { DestinationChooser, useDestinationChooser, type SendMode } from "./DestinationChooser";
 
 /** How close to an edge (px) the cursor must be to reveal that edge's controls. */
 const EDGE_REVEAL_PX = 120;
 /** How long the image counter stays up after switching photos, before fading. */
 const INFO_FLASH_MS = 2200;
+/**
+ * How long a photo must stay current before its original starts loading. Key
+ * repeat fires every ~30 ms, so while the user is flicking through photos with a
+ * held arrow key nothing but thumbnails is read; the original is requested only
+ * once they stop. (An `orig://` read of a huge file cannot be cancelled once the
+ * backend has started it, so not starting it is the only real saving.)
+ */
+const NAV_SETTLE_MS = 90;
+/** How long to rest on a photo — after it has loaded — before preloading its neighbours. */
+const NEIGHBOUR_IDLE_MS = 300;
 
 /**
  * Real fullscreen view of the **full-resolution** photo.
@@ -38,18 +47,20 @@ const INFO_FLASH_MS = 2200;
  * While open it puts the OS window into fullscreen (no title bar / borders) and
  * the image fills the whole screen. Opening a 100 MP file off slow storage takes
  * a moment, so the cached grid thumbnail is shown first — stretched to fill the
- * screen — then the original streams in via `orig://` and fades in over it. The
- * current photo plus its immediate neighbours are kept mounted (see {@link Slide})
- * so stepping to an already-decoded neighbour is instant.
+ * screen — then the original streams in via `orig://` and fades in over it.
+ *
+ * The current photo and its immediate neighbours are kept mounted (see
+ * {@link Slide}) so stepping to an already-decoded neighbour is instant. The
+ * neighbours' originals are requested only after the current photo has finished
+ * loading and the user has paused on it, so they never compete with it for a slow
+ * card's bandwidth.
  *
  * A bottom toolbar (revealed when the cursor nears the bottom edge) carries the
  * culling controls: navigate, Copy to a target location, rate 1–5, flag. Marks
  * persist per photo. Arrow keys / chevrons / gamepad d-pad navigate; the toolbar
- * actions also have keyboard shortcuts (C, 1–5, F); Escape / the close button /
+ * actions also have keyboard shortcuts (C, M, 1–5, F); Escape / the close button /
  * gamepad B exit.
  */
-type SendMode = "copy" | "move";
-
 export function Lightbox({
   dir,
   entries,
@@ -94,29 +105,62 @@ export function Lightbox({
   const entry = entries[index];
   const isSelected = selectedPaths?.has(entry.path) ?? false;
 
+  const config = useConfig();
+  const lightboxInFullscreen = config?.lightboxInFullscreen ?? null;
+  const exifOverlayEnabled = config?.exifOverlayEnabled ?? false;
+
   const [marks, setMarks] = useState<Record<string, Mark>>({});
-  const [targets, setTargets] = useState<string[]>([]);
   const [toolbarShown, setToolbarShown] = useState(false);
   const [edges, setEdges] = useState({ top: false, left: false, right: false });
   const [infoFlash, setInfoFlash] = useState(true); // counter shows on open + after switching
-  const [menuMode, setMenuMode] = useState<SendMode | null>(null);
-  const [menuIndex, setMenuIndex] = useState(0); // highlighted destination in the chooser
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
-  const [lightboxInFullscreen, setLightboxInFullscreen] = useState<boolean | null>(null);
   const [rotateNonceByPath, setRotateNonceByPath] = useState<Record<string, number>>({});
   const [exifModalOpen, setExifModalOpen] = useState(false);
-  const [exifInfo, setExifInfo] = useState<ExifInfo | null>(null);
+  const [exif, setExif] = useState<{ path: string; info: ExifInfo | null } | null>(null);
   const [exifLoading, setExifLoading] = useState(false);
-  const [exifOverlayEnabled, setExifOverlayEnabled] = useState(false);
   const [savingExifOverlay, setSavingExifOverlay] = useState(false);
   const [exiting, setExiting] = useState(false);
   const closingRef = useRef(false);
+
+  // Loading schedule (see NAV_SETTLE_MS / NEIGHBOUR_IDLE_MS). `settledPath` starts
+  // as the opening photo, so the photo the user clicked loads without any delay.
+  const [settledPath, setSettledPath] = useState(entry.path);
+  const [idlePath, setIdlePath] = useState<string | null>(null);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+
+  const chooser = useDestinationChooser((target, mode) => void sendTo(target, mode));
+  const menuMode = chooser.mode;
 
   const mark = marks[entry.name] ?? EMPTY_MARK;
   const showToolbar = !exiting && (toolbarShown || menuMode !== null || confirmingDelete || exifModalOpen);
   const rotateNonce = rotateNonceByPath[entry.path] ?? 0;
   const showInfo = !exiting && (infoFlash || toolbarShown);
+  // Only ever show EXIF that belongs to the photo on screen.
+  const exifInfo = exif?.path === entry.path ? exif.info : null;
+
+  const settled = settledPath === entry.path;
+  const activeKey = slideKey(entry.path, rotateNonce);
+  const preloadNeighbours = idlePath === entry.path && (entry.video || loadedKey === activeKey);
+
+  useEffect(() => {
+    const path = entry.path;
+    const settle = setTimeout(() => setSettledPath(path), NAV_SETTLE_MS);
+    const idle = setTimeout(() => setIdlePath(path), NEIGHBOUR_IDLE_MS);
+    return () => {
+      clearTimeout(settle);
+      clearTimeout(idle);
+    };
+  }, [entry.path]);
+
+  // Freeze the page underneath: the gallery scrolls the document, and a wheel or
+  // arrow-key gesture over the lightbox must not move the grid behind it.
+  const unlockScrollRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const unlock = lockPageScroll();
+    unlockScrollRef.current = unlock;
+    return unlock;
+  }, []);
 
   function getActiveImageRect(): DOMRect | null {
     const slide = document.querySelector(".ph-lb-slide-active");
@@ -133,7 +177,7 @@ export function Lightbox({
     try {
       if (onAnimateClose && !prefersReducedMotion() && !entry.video) {
         setExiting(true);
-        setMenuMode(null);
+        chooser.close();
         setConfirmingDelete(false);
         setExifModalOpen(false);
 
@@ -145,7 +189,13 @@ export function Lightbox({
           }
         }
 
-        const imageSrc = `${thumbUrl(entry, 512)}&r=${rotateNonce}`;
+        // The close animation scrolls the grid to the photo's tile and measures it,
+        // so the page has to be scrollable (and laid out normally) again first.
+        unlockScrollRef.current?.();
+
+        // Same URL the grid tile uses, so the flying clone paints from the image
+        // cache instead of waiting on a fresh read from slow storage.
+        const imageSrc = thumbUrl(entry, 256, rotateNonce);
         await onAnimateClose({
           path: entry.path,
           index,
@@ -160,43 +210,36 @@ export function Lightbox({
     }
   }
 
-  // Load this directory's saved marks + the configured copy targets.
+  // Load this directory's saved marks.
   useEffect(() => {
     let alive = true;
     getMarks(dir).then(
       (m) => alive && setMarks(m),
       () => alive && setMarks({}),
     );
-    invoke<Config>("get_config").then(
-      (cfg) => {
-        if (!alive) return;
-        setTargets(cfg.targetDirectories);
-        setMenuIndex(menuIndexForConfig(cfg));
-        setLightboxInFullscreen(cfg.lightboxInFullscreen);
-        setExifOverlayEnabled(cfg.exifOverlayEnabled);
-      },
-      () => {},
-    );
     return () => {
       alive = false;
     };
   }, [dir]);
 
-  // Load EXIF when the modal is open or the always-on overlay is enabled.
+  // Load EXIF when the modal is open or the always-on overlay is enabled — but
+  // only once the user has settled on a photo, not for every one flicked past.
   useEffect(() => {
     if (!exifModalOpen && !exifOverlayEnabled) {
-      setExifInfo(null);
+      setExif(null);
       setExifLoading(false);
       return;
     }
+    if (!settled) return;
+    const path = entry.path;
     let alive = true;
     setExifLoading(true);
-    getExifInfo(entry.path)
+    getExifInfo(path)
       .then((info) => {
-        if (alive) setExifInfo(info);
+        if (alive) setExif({ path, info });
       })
       .catch(() => {
-        if (alive) setExifInfo(null);
+        if (alive) setExif({ path, info: null });
       })
       .finally(() => {
         if (alive) setExifLoading(false);
@@ -204,7 +247,7 @@ export function Lightbox({
     return () => {
       alive = false;
     };
-  }, [entry.path, exifModalOpen, exifOverlayEnabled, rotateNonce]);
+  }, [entry.path, exifModalOpen, exifOverlayEnabled, rotateNonce, settled]);
 
   // Drive the OS window into fullscreen for as long as the lightbox is open,
   // restoring the previous state on close (unless the user was already fullscreen).
@@ -262,13 +305,10 @@ export function Lightbox({
   async function toggleExifOverlay(next: boolean) {
     if (savingExifOverlay) return;
     setSavingExifOverlay(true);
-    setExifOverlayEnabled(next);
     try {
-      const cfg = await invoke<Config>("get_config");
-      const updated: Config = { ...cfg, exifOverlayEnabled: next };
-      await invoke("save_config", { config: updated });
+      await updateConfig({ exifOverlayEnabled: next });
     } catch {
-      setExifOverlayEnabled((prev) => !prev);
+      /* updateConfig restored the saved value */
     } finally {
       setSavingExifOverlay(false);
     }
@@ -309,66 +349,37 @@ export function Lightbox({
   const toggleFlag = () => applyMark({ ...mark, flag: !mark.flag });
   const toggleSelected = () => onToggleSelected?.(entry.path);
 
+  /** Marks live outside the photos, so a file that left the folder leaves an orphan to clear. */
+  function clearMarksFor(paths: string[]) {
+    for (const path of paths) void setMark(dir, baseName(path), EMPTY_MARK).catch(() => {});
+  }
+
   async function sendTo(target: string, mode: SendMode) {
-    setMenuMode(null);
-    persistLastTargetDirectory(target);
     const acted = entry; // the photo at action time — frozen across the await
     const actedPaths = actionPathsFor(acted);
     const dest = shortenPath(target);
-    setStatus(`${mode === "copy" ? "Copying" : "Moving"} ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}…`);
+    const files = plural(actedPaths.length, "file");
+    setStatus(`${mode === "copy" ? "Copying" : "Moving"} ${files} to ${dest}…`);
     try {
       if (mode === "copy") {
         for (const path of actedPaths) {
           await copyToTarget(path, target);
         }
         onSessionSent?.([acted.path]);
-        setStatus(`Copied ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}`);
+        setStatus(`Copied ${files} to ${dest}`);
       } else {
         for (const path of actedPaths) {
           await moveToTarget(path, target);
         }
         onSessionSent?.([acted.path]);
         // Moved files left the folder: drop their marks and tiles.
-        for (const path of actedPaths) {
-          const name = path.split(/[/\\]/).pop();
-          if (name) void setMark(dir, name, EMPTY_MARK).catch(() => {});
-        }
+        clearMarksFor(actedPaths);
         onRemoved(actedPaths);
-        setStatus(`Moved ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"} to ${dest}`);
+        setStatus(`Moved ${files} to ${dest}`);
       }
     } catch (e) {
       setStatus(`${mode === "copy" ? "Copy" : "Move"} failed: ${String(e)}`);
     }
-  }
-  // The chooser lists the saved targets, then a final "Browse…" entry.
-  const browseIndex = targets.length;
-  const itemCount = targets.length + 1;
-  const selIndex = Math.min(menuIndex, itemCount - 1);
-
-  const cycleMenu = (delta: number) => {
-    const next = (((menuIndex + delta) % itemCount) + itemCount) % itemCount;
-    setMenuIndex(next);
-    if (next < targets.length) persistLastTargetDirectory(targets[next]);
-  };
-
-  // "Browse…" — pick any folder via the native dialog, then send there.
-  async function browseAndSend(mode: SendMode) {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== "string") return;
-    try {
-      const cfg = await invoke<Config>("add_target_directory", { dir: selected });
-      setTargets(cfg.targetDirectories);
-      const idx = cfg.targetDirectories.findIndex((d) => d === selected);
-      if (idx >= 0) setMenuIndex(idx);
-    } catch {
-      // If persisting the target fails, still allow this one-off send.
-    }
-    void sendTo(selected, mode);
-  }
-
-  function confirmSelection(mode: SendMode) {
-    if (selIndex === browseIndex) void browseAndSend(mode);
-    else void sendTo(targets[selIndex], mode);
   }
 
   // First press of C/M opens the destination chooser in that mode; pressing the
@@ -377,70 +388,50 @@ export function Lightbox({
   // different destination in between.
   function requestSend(mode: SendMode) {
     setToolbarShown(true);
-    if (menuMode === mode) confirmSelection(mode);
-    else setMenuMode(mode);
+    chooser.request(mode);
   }
 
   async function doDelete() {
     const acted = entry;
     const actedPaths = actionPathsFor(acted);
+    const files = plural(actedPaths.length, "file");
     setConfirmingDelete(false);
-    setStatus(`Deleting ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"}…`);
+    setStatus(`Deleting ${files}…`);
     try {
       for (const path of actedPaths) {
         await deleteFile(path);
       }
-      for (const path of actedPaths) {
-        const name = path.split(/[/\\]/).pop();
-        if (name) void setMark(dir, name, EMPTY_MARK).catch(() => {});
-      }
+      clearMarksFor(actedPaths);
       onRemoved(actedPaths);
-      setStatus(`Deleted ${actedPaths.length} file${actedPaths.length === 1 ? "" : "s"}`);
+      setStatus(`Deleted ${files}`);
     } catch (e) {
       setStatus(`Delete failed: ${String(e)}`);
     }
   }
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (exifModalOpen) {
-        if (e.key === "Escape") return setExifModalOpen(false);
-        return;
-      }
-      // While the destination chooser is open, ↑/↓ cycle it and Enter confirms.
-      if (menuMode) {
-        if (e.key === "Escape") return setMenuMode(null);
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          return cycleMenu(-1);
-        }
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          return cycleMenu(1);
-        }
-        if (e.key === "Enter") {
-          e.preventDefault();
-          confirmSelection(menuMode);
-          return;
-        }
-      } else if (e.key === "Escape") {
-        // Escape backs out of a pending delete confirmation before closing.
-        return confirmingDelete ? setConfirmingDelete(false) : void handleClose();
-      }
-      if (e.key === "ArrowLeft") return goPrev();
-      if (e.key === "ArrowRight") return goNext();
-      if (k === "c") return requestSend("copy");
-      if (k === "m") return requestSend("move");
-      if (k === "f") return toggleFlag();
-      if (selectionMode && k === "s") return toggleSelected();
-      if (k === "0") return applyMark({ ...mark, rating: 0 });
-      if (k >= "1" && k <= "5") return setRating(Number(k));
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, mark, targets, menuMode, menuIndex, confirmingDelete, exifModalOpen, hasPrev, hasNext, onClose, onIndex]);
+  useWindowKeydown((e) => {
+    // Leave OS / webview shortcuts (Ctrl+C, Cmd+M, Alt+F4 …) alone.
+    if (hasCommandModifier(e)) return;
+    const k = e.key.toLowerCase();
+    if (exifModalOpen) {
+      if (e.key === "Escape") setExifModalOpen(false);
+      return;
+    }
+    // While the destination chooser is open, ↑/↓ cycle it and Enter confirms.
+    if (chooser.handleKey(e)) return;
+    if (e.key === "Escape") {
+      // Escape backs out of a pending delete confirmation before closing.
+      return confirmingDelete ? setConfirmingDelete(false) : void handleClose();
+    }
+    if (e.key === "ArrowLeft") return void goPrev();
+    if (e.key === "ArrowRight") return void goNext();
+    if (k === "c") return requestSend("copy");
+    if (k === "m") return requestSend("move");
+    if (k === "f") return toggleFlag();
+    if (selectionMode && k === "s") return toggleSelected();
+    if (k === "0") return applyMark({ ...mark, rating: 0 });
+    if (k >= "1" && k <= "5") return setRating(Number(k));
+  });
 
   useGamepad((button) => {
     if (exifModalOpen) {
@@ -453,16 +444,14 @@ export function Lightbox({
     if (button === "lb") return void rotateCurrent(false);
     if (button === "rb") return void rotateCurrent(true);
     // In the chooser, the d-pad cycles destinations, A confirms, B cancels.
-    if (menuMode) {
-      if (button === "up") cycleMenu(-1);
-      else if (button === "down") cycleMenu(1);
-      else if (button === "a") confirmSelection(menuMode);
-      else if (button === "b") setMenuMode(null);
-      return;
-    }
+    if (chooser.handleGamepad(button)) return;
     if (button === "left" || button === "up") goPrev();
     else if (button === "right" || button === "down") goNext();
-    else if (button === "b") void handleClose();
+    else if (button === "b") {
+      // B backs out of a pending delete confirmation before closing, like Escape.
+      if (confirmingDelete) setConfirmingDelete(false);
+      else void handleClose();
+    }
   });
 
   // Keep the current photo and its neighbours mounted so prev/next stay decoded.
@@ -475,8 +464,10 @@ export function Lightbox({
           key={entries[i].path}
           entry={entries[i]}
           active={i === index}
+          load={i === index ? settled : preloadNeighbours}
           nonce={rotateNonceByPath[entries[i].path] ?? 0}
           overlay={exifOverlayEnabled && i === index && !entries[i].video ? exifInfo?.overlay ?? null : null}
+          onFullLoaded={setLoadedKey}
         />
       ))}
 
@@ -575,36 +566,12 @@ export function Lightbox({
       )}
 
       {!exiting && menuMode && (
-        <div className="ph-lb-menu-backdrop" onClick={() => setMenuMode(null)}>
-          <div className="ph-lb-menu" onClick={(e) => e.stopPropagation()}>
-            <div className="ph-lb-menu-title">{menuMode === "copy" ? "Copy to…" : "Move to…"}</div>
-            {targets.map((t, i) => (
-              <button
-                key={t}
-                type="button"
-                className={`ph-lb-menu-item${i === selIndex ? " ph-lb-menu-item-selected" : ""}`}
-                onClick={() => sendTo(t, menuMode)}
-                onMouseEnter={() => setMenuIndex(i)}
-                title={t}
-              >
-                <FolderInput className="h-4 w-4 shrink-0" />
-                <span className="ph-lb-menu-label">{shortenPath(t)}</span>
-              </button>
-            ))}
-            <button
-              type="button"
-              className={`ph-lb-menu-item ph-lb-menu-browse${selIndex === browseIndex ? " ph-lb-menu-item-selected" : ""}`}
-              onClick={() => browseAndSend(menuMode)}
-              onMouseEnter={() => setMenuIndex(browseIndex)}
-            >
-              <FolderSearch className="h-4 w-4 shrink-0" />
-              <span className="ph-lb-menu-label">Browse…</span>
-            </button>
-            <div className="ph-lb-menu-hint">
-              ↑↓ choose · Enter or {menuMode === "copy" ? "C" : "M"} to {menuMode}
-            </div>
-          </div>
-        </div>
+        <DestinationChooser
+          chooser={chooser}
+          title={menuMode === "copy" ? "Copy to…" : "Move to…"}
+          hint={`↑↓ choose · Enter or ${menuMode === "copy" ? "C" : "M"} to ${menuMode}`}
+          backdropClassName="ph-lb-menu-backdrop"
+        />
       )}
 
       {!exiting && (
@@ -752,30 +719,70 @@ export function Lightbox({
   );
 }
 
+/** Identifies one loaded image: a photo at a particular rotation. */
+function slideKey(path: string, nonce: number): string {
+  return `${path}#${nonce}`;
+}
+
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 8;
+const WHEEL_ZOOM_SENSITIVITY = 0.0015;
+const GESTURE_ZOOM_SENSITIVITY = 0.015;
+
+/** Zoom factor plus pan offset (px) of a slide. */
+interface View {
+  scale: number;
+  x: number;
+  y: number;
+}
+
+const IDENTITY_VIEW: View = { scale: 1, x: 0, y: 0 };
+
+/** Clamps a view to the zoom range, and its pan so the image cannot leave `container`. */
+function clampView(container: HTMLElement | null, scale: number, x: number, y: number): View {
+  const s = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, scale));
+  if (!container || s <= 1) return s === 1 ? IDENTITY_VIEW : { scale: s, x: 0, y: 0 };
+  const boundX = ((s - 1) * container.clientWidth) / 2;
+  const boundY = ((s - 1) * container.clientHeight) / 2;
+  return {
+    scale: s,
+    x: Math.min(boundX, Math.max(-boundX, x)),
+    y: Math.min(boundY, Math.max(-boundY, y)),
+  };
+}
+
 /**
  * One photo in the kept-mounted window: a stretched thumbnail placeholder with
  * the full-resolution original fading in over it. Inactive slides stay mounted
  * (hidden) so their decoded original is retained for instant navigation.
+ *
+ * The original is requested only once `load` is true (the host decides when — see
+ * {@link Lightbox}); from then on it stays, so a photo that was current keeps its
+ * decoded image when it becomes a neighbour. When the slide leaves the window the
+ * request is aborted, so an original the user has moved away from stops loading.
  */
 function Slide({
   entry,
   active,
+  load,
   nonce,
   overlay,
+  onFullLoaded,
 }: {
   entry: ImageEntry;
   active: boolean;
+  /** Whether the original may start loading now. */
+  load: boolean;
   nonce: number;
   overlay: ExifOverlay | null;
+  /** Reports the {@link slideKey} of the active slide once its original is on screen. */
+  onFullLoaded: (key: string) => void;
 }) {
-  const MIN_ZOOM = 1;
-  const MAX_ZOOM = 8;
-  const WHEEL_ZOOM_SENSITIVITY = 0.0015;
-  const GESTURE_ZOOM_SENSITIVITY = 0.015;
+  const [started, setStarted] = useState(load);
+  if (load && !started) setStarted(true);
 
-  const [fullLoaded, setFullLoaded] = useState(false);
-  const [scale, setScale] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const [view, setView] = useState<View>(IDENTITY_VIEW);
   const [dragState, setDragState] = useState<{
     id: number;
     startX: number;
@@ -784,60 +791,38 @@ function Slide({
     startOffsetY: number;
   } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const thumbSrc = `${thumbUrl(entry, 256)}&r=${nonce}`;
-  const fullSrc = entry.raw ? `${thumbUrl(entry, 2048)}&r=${nonce}` : `${origUrl(entry)}?r=${nonce}`;
+  // The placeholder reuses the grid tile's exact URL, so it comes from the cache.
+  const thumbSrc = thumbUrl(entry, 256, nonce);
+  const fullSrc = entry.raw ? thumbUrl(entry, 2048, nonce) : origUrl(entry, nonce);
+  const fullLoaded = loadedSrc === fullSrc;
+  const loadKey = slideKey(entry.path, nonce);
 
-  function clampScale(next: number) {
-    return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
-  }
-
-  function panBounds(nextScale: number) {
-    const el = containerRef.current;
-    if (!el || nextScale <= 1) return { x: 0, y: 0 };
-    const x = ((nextScale - 1) * el.clientWidth) / 2;
-    const y = ((nextScale - 1) * el.clientHeight) / 2;
-    return { x, y };
-  }
-
-  function clampOffset(nextOffset: { x: number; y: number }, nextScale: number) {
-    const bounds = panBounds(nextScale);
-    return {
-      x: Math.min(bounds.x, Math.max(-bounds.x, nextOffset.x)),
-      y: Math.min(bounds.y, Math.max(-bounds.y, nextOffset.y)),
-    };
-  }
-
-  function applyScale(nextScale: number) {
-    const clampedScale = clampScale(nextScale);
-    setScale(clampedScale);
-    setOffset((prev) => clampOffset(clampedScale <= 1 ? { x: 0, y: 0 } : prev, clampedScale));
-  }
-
-  function zoomBy(delta: number) {
-    if (!active) return;
-    applyScale(scale * (1 + delta));
-  }
+  // Abort the (possibly multi-megabyte) request when this slide unmounts: without
+  // this the webview keeps downloading an original nobody is going to look at.
+  const abortOnUnmount = useCallback((node: HTMLImageElement | null) => {
+    if (!node) return;
+    return () => node.removeAttribute("src");
+  }, []);
 
   useEffect(() => {
-    setFullLoaded(false);
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
+    if (active && fullLoaded) onFullLoaded(loadKey);
+  }, [active, fullLoaded, loadKey, onFullLoaded]);
+
+  // A different image (or rotation) starts un-zoomed; so does a slide that is
+  // no longer the one on screen.
+  useEffect(() => {
+    setView(IDENTITY_VIEW);
     setDragState(null);
-  }, [entry.path, nonce]);
+  }, [entry.path, nonce, active]);
 
   useEffect(() => {
-    if (active) return;
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-    setDragState(null);
-  }, [active]);
-
-  useEffect(() => {
-    const onResize = () => setOffset((prev) => clampOffset(prev, scale));
+    const onResize = () => setView((v) => clampView(containerRef.current, v.scale, v.x, v.y));
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [scale]);
+  }, []);
 
+  // Wheel / pinch zoom. These are native listeners because they must be able to
+  // `preventDefault()`: React attaches `wheel` passively, where that is a no-op.
   useEffect(() => {
     if (!active) return;
     const node = containerRef.current;
@@ -845,6 +830,15 @@ function Slide({
 
     type GestureEventLike = Event & { scale?: number };
 
+    // Functional update: several wheel events can arrive within one frame, and
+    // each must build on the previous one rather than on a stale render's scale.
+    const zoomBy = (delta: number) => {
+      if (delta !== 0) setView((v) => clampView(node, v.scale * (1 + delta), v.x, v.y));
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      zoomBy(-e.deltaY * WHEEL_ZOOM_SENSITIVITY);
+    };
     const onGestureStart = (ev: Event) => {
       ev.preventDefault();
     };
@@ -852,25 +846,27 @@ function Slide({
       const e = ev as GestureEventLike;
       if (typeof e.scale !== "number") return;
       ev.preventDefault();
-      const delta = (e.scale - 1) * GESTURE_ZOOM_SENSITIVITY;
-      if (delta !== 0) zoomBy(delta);
+      zoomBy((e.scale - 1) * GESTURE_ZOOM_SENSITIVITY);
     };
     const onGestureEnd = (ev: Event) => {
       ev.preventDefault();
     };
 
+    node.addEventListener("wheel", onWheel, { passive: false });
     node.addEventListener("gesturestart", onGestureStart, { passive: false });
     node.addEventListener("gesturechange", onGestureChange, { passive: false });
     node.addEventListener("gestureend", onGestureEnd, { passive: false });
     return () => {
+      node.removeEventListener("wheel", onWheel);
       node.removeEventListener("gesturestart", onGestureStart);
       node.removeEventListener("gesturechange", onGestureChange);
       node.removeEventListener("gestureend", onGestureEnd);
     };
-  }, [active, scale]);
+  }, [active]);
 
-  const zoomed = scale > 1.01;
+  const zoomed = view.scale > 1.01;
   const dragging = dragState !== null;
+  const transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
 
   // Videos play natively with the webview's media element (with built-in controls).
   // Only the active slide mounts the <video> so neighbours don't preload/autoplay.
@@ -899,20 +895,9 @@ function Slide({
       ref={containerRef}
       className={`ph-lb-slide${active ? " ph-lb-slide-active" : ""}${zoomed ? " ph-lb-slide-zoomed" : ""}${dragging ? " ph-lb-slide-dragging" : ""}`}
       aria-hidden={!active}
-      onWheel={(e) => {
-        if (!active) return;
-        e.preventDefault();
-        const delta = -e.deltaY * WHEEL_ZOOM_SENSITIVITY;
-        if (delta !== 0) zoomBy(delta);
-      }}
       onDoubleClick={() => {
         if (!active) return;
-        if (zoomed) {
-          setScale(1);
-          setOffset({ x: 0, y: 0 });
-        } else {
-          setScale(2);
-        }
+        setView(zoomed ? IDENTITY_VIEW : clampView(containerRef.current, 2, 0, 0));
       }}
       onPointerDown={(e) => {
         if (!active || !zoomed || e.button !== 0) return;
@@ -922,15 +907,15 @@ function Slide({
           id: e.pointerId,
           startX: e.clientX,
           startY: e.clientY,
-          startOffsetX: offset.x,
-          startOffsetY: offset.y,
+          startOffsetX: view.x,
+          startOffsetY: view.y,
         });
       }}
       onPointerMove={(e) => {
         if (!dragState || dragState.id !== e.pointerId) return;
-        const dx = e.clientX - dragState.startX;
-        const dy = e.clientY - dragState.startY;
-        setOffset(clampOffset({ x: dragState.startOffsetX + dx, y: dragState.startOffsetY + dy }, scale));
+        const x = dragState.startOffsetX + e.clientX - dragState.startX;
+        const y = dragState.startOffsetY + e.clientY - dragState.startY;
+        setView((v) => clampView(containerRef.current, v.scale, x, y));
       }}
       onPointerUp={(e) => {
         if (!dragState || dragState.id !== e.pointerId) return;
@@ -950,21 +935,21 @@ function Slide({
         alt=""
         aria-hidden
         className="ph-lb-img ph-lb-placeholder"
-        style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }}
+        style={{ transform }}
         draggable={false}
       />
       {/* The real, full-resolution photo — fades in once decoded. */}
-      <img
-        src={fullSrc}
-        alt={entry.name}
-        className="ph-lb-img ph-lb-full"
-        style={{
-          opacity: fullLoaded ? 1 : 0,
-          transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-        }}
-        draggable={false}
-        onLoad={() => setFullLoaded(true)}
-      />
+      {started && (
+        <img
+          ref={abortOnUnmount}
+          src={fullSrc}
+          alt={entry.name}
+          className="ph-lb-img ph-lb-full"
+          style={{ opacity: fullLoaded ? 1 : 0, transform }}
+          draggable={false}
+          onLoad={() => setLoadedSrc(fullSrc)}
+        />
+      )}
       {active && !fullLoaded && (
         <div className="ph-lb-loading">
           <Loader2 className="h-5 w-5 animate-spin" />

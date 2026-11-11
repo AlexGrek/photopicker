@@ -100,6 +100,12 @@ Because an open can arrive before the webview exists, requests are bridged caref
 
 Convention for directional navigation: d-pad **left/up = previous**, **right/down = next**, **B = back/close** — mirroring the arrow-key + Escape bindings. Face buttons can shortcut actions (in the lightbox **Y = Copy**, mirroring the `C` key). The lightbox (`Lightbox.tsx`) is the reference implementation.
 
+**Layered surfaces must disable input beneath them.** `useGamepad(handler, enabled)` and `useWindowKeydown(handler, enabled)` deliver every press to *every* enabled listener. A surface covered by another (the selection bar under the lightbox) must pass `enabled = false` while covered, or one press acts on two layers. The grid itself is keyboard/gamepad navigable (arrows/d-pad move focus, Enter/A opens, Esc/B goes back), and yields to the selection bar while it has a chooser or confirmation open.
+
+**Shared config store.** Read config with `useConfig()` / `loadConfig()` and change it with `configCommand()` / `updateConfig()` from `src/lib/config.ts` — never raw `invoke("get_config")` — so every screen sees the same cached copy.
+
+**Checks:** `npm run lint`, `npm test`, `npx tsc --noEmit`.
+
 ### Culling: marks & copy
 The lightbox is a culling surface. A bottom toolbar — revealed only when the cursor nears the bottom edge — carries `← | Copy (C) | Move (M) | Mark (1–5) | Flag (F) | Delete | →`. Most actions have a keyboard shortcut; **Delete deliberately has none** (it requires a click and an inline confirm). The close (✕) and side nav buttons reveal/fade by edge proximity too, and the image counter (`N / total` + name) flashes on switch then fades — all so the photo fills the screen uninterrupted while idle.
 

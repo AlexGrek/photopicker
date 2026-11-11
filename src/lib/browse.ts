@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { LruMap } from "./lru";
 import { type ImageEntry } from "@/lib/thumbnails";
 
 /** Max recursion depth when sampling a folder tile's 2×2 preview mosaic. */
@@ -30,7 +31,28 @@ export function listDirectories(dir: string): Promise<DirectoryEntry[]> {
   return invoke<DirectoryEntry[]>("list_directories", { dir });
 }
 
+// Folder tiles are virtualized, so one tile mounts many times as it scrolls in
+// and out of view. Each `directory_preview` call walks up to `maxDepth` levels of
+// a possibly slow volume, so the in-flight/settled promise is cached per folder.
+const previewCache = new LruMap<string, Promise<ImageEntry[]>>(500);
+
 /** Up to four image previews for a folder tile, recursing at most `maxDepth` levels. */
 export function directoryPreview(dir: string, maxDepth: number): Promise<ImageEntry[]> {
-  return invoke<ImageEntry[]>("directory_preview", { dir, maxDepth });
+  const key = `${maxDepth}\n${dir}`;
+  const cached = previewCache.get(key);
+  if (cached) return cached;
+  const request = invoke<ImageEntry[]>("directory_preview", { dir, maxDepth });
+  previewCache.set(key, request);
+  // A failed walk (card pulled, share offline) should be retried next time.
+  request.catch(() => previewCache.delete(key));
+  return request;
+}
+
+/**
+ * Drops every cached folder preview. Called when files are moved or deleted (a
+ * cached preview may name a file that no longer exists) and when a location is
+ * freshly opened from the main menu.
+ */
+export function invalidateDirectoryPreviews(): void {
+  previewCache.clear();
 }

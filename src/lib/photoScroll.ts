@@ -16,47 +16,72 @@ function isComfortablyVisible(el: HTMLElement, margin = 48): boolean {
   return r.top >= margin && r.bottom <= window.innerHeight - margin;
 }
 
+/** How many extra positions to probe around the estimate before giving up. */
+const MAX_PROBES = 8;
+
 /**
- * Brings a gallery tile into view. List rows are always mounted; masonry tiles may
- * virtualize, so we jump by index then scan until the element appears.
+ * The scroll offsets to probe when the estimated position did not mount the tile:
+ * alternating one step below / above the estimate, moving outward, clamped to the
+ * scrollable range and without repeats. Bounded by `maxProbes`, so a miss costs a
+ * handful of frames rather than a walk over the entire grid.
+ */
+export function probeOffsets(estimate: number, step: number, maxScroll: number, maxProbes = MAX_PROBES): number[] {
+  const offsets: number[] = [];
+  const seen = new Set<number>([Math.round(estimate)]);
+  for (let ring = 1; offsets.length < maxProbes && ring <= maxProbes; ring++) {
+    for (const direction of [1, -1]) {
+      const y = Math.min(maxScroll, Math.max(0, estimate + direction * ring * step));
+      const rounded = Math.round(y);
+      if (seen.has(rounded)) continue;
+      seen.add(rounded);
+      offsets.push(y);
+      if (offsets.length >= maxProbes) break;
+    }
+  }
+  return offsets;
+}
+
+async function settle(el: HTMLElement): Promise<HTMLElement> {
+  if (!isComfortablyVisible(el)) el.scrollIntoView({ block: "center", behavior: "instant" });
+  await nextFrame();
+  return el;
+}
+
+/**
+ * Brings a gallery tile into view and resolves to its element, or to `null` if it
+ * could not be located (the scroll position is then restored).
+ *
+ * Tiles are virtualized, so one that is far from the viewport is not in the DOM.
+ * We jump to its estimated offset — `index / total` of the way down — and, if it
+ * did not mount there, probe a few positions around that estimate. The search is
+ * deliberately bounded: every probe mounts a screenful of tiles and requests
+ * their thumbnails, which on slow storage must not turn into a scan of the whole
+ * folder.
+ *
+ * @param index position of the tile among *all* items in the grid (folders included)
+ * @param total number of items in the grid
  */
 export async function scrollToPhoto(path: string, index: number, total: number): Promise<HTMLElement | null> {
   let el = findPhotoElement(path);
-  if (el && isComfortablyVisible(el)) return el;
+  if (el) return isComfortablyVisible(el) ? el : settle(el);
+  if (total <= 1 || index < 0) return null;
 
-  if (el) {
-    el.scrollIntoView({ block: "center", behavior: "instant" });
-    await nextFrame();
-    return el;
-  }
-
+  const startY = window.scrollY;
   const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-  if (total > 1 && index >= 0) {
-    window.scrollTo({ top: (index / (total - 1)) * maxScroll, behavior: "auto" });
-    await nextFrame();
-    await nextFrame();
-    el = findPhotoElement(path);
-    if (el) {
-      if (!isComfortablyVisible(el)) el.scrollIntoView({ block: "center", behavior: "instant" });
-      await nextFrame();
-      return el;
-    }
-  }
-
-  // Progressive scan for virtualized masonry tiles.
+  const estimate = (index / (total - 1)) * maxScroll;
   const step = Math.max(240, window.innerHeight * 0.75);
-  for (let y = 0; y <= maxScroll; y += step) {
-    window.scrollTo({ top: y, behavior: "auto" });
+
+  for (const y of [estimate, ...probeOffsets(estimate, step, maxScroll)]) {
+    window.scrollTo({ top: y, behavior: "instant" });
+    // Two frames: one for the virtualizer to react to the scroll, one to render.
+    await nextFrame();
     await nextFrame();
     el = findPhotoElement(path);
-    if (el) {
-      if (!isComfortablyVisible(el)) el.scrollIntoView({ block: "center", behavior: "instant" });
-      await nextFrame();
-      return el;
-    }
+    if (el) return settle(el);
   }
 
-  return findPhotoElement(path);
+  window.scrollTo({ top: startY, behavior: "instant" });
+  return null;
 }
 
 /** Duration of the lightbox-to-tile shrink animation (ms). Keep in sync with CSS. */

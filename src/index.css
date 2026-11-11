@@ -467,6 +467,10 @@
 
 .ph-gallery-list-item {
   list-style: none;
+  /* Off-screen rows skip layout and paint, which keeps a long list cheap. Rows
+     are a fixed ~82px tall, so the placeholder size keeps the scrollbar stable. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 82px;
 }
 
 .ph-gallery-list-row {
@@ -1104,6 +1108,18 @@ button.ph-gallery-list-row {
   outline-color: hsl(var(--ring) / 0.6);
 }
 
+.ph-tile-focused,
+.ph-tile-focused:hover {
+  outline-color: hsl(var(--ring));
+  outline-style: dashed;
+  outline-width: 3px;
+}
+
+.ph-gallery-list-item-focused .ph-gallery-list-row {
+  outline: 3px dashed hsl(var(--ring));
+  outline-offset: -3px;
+}
+
 .ph-tile-selected,
 .ph-tile-selected:hover,
 .ph-tile-selected:has(.ph-tile-hit:hover) {
@@ -1218,8 +1234,7 @@ button.ph-gallery-list-row {
   background: hsl(var(--muted));
 }
 
-.ph-dir-preview-wrap,
-.ph-gallery-list-dir-thumb {
+.ph-dir-preview-wrap {
   position: absolute;
   inset: 0;
   overflow: hidden;
@@ -1425,9 +1440,6 @@ button.ph-gallery-list-row {
 .ph-cell-ghost,
 .ph-gallery-list-item-ghost {
   visibility: hidden;
-}
-
-.ph-gallery-list-item-ghost {
   pointer-events: none;
 }
 
@@ -1453,6 +1465,11 @@ button.ph-gallery-list-row {
 
 .ph-lb-slide-dragging {
   cursor: grabbing;
+}
+
+/* Panning must track the pointer exactly; only zoom steps are eased. */
+.ph-lb-slide-dragging .ph-lb-img {
+  transition: none;
 }
 
 /* Both the placeholder and the real photo fill the whole screen, edge to edge. */
@@ -2029,4 +2046,11 @@ button.ph-gallery-list-row {
   font-size: 0.68rem;
   color: rgba(255, 255, 255, 0.45);
   text-align: center;
+}
+
+/* Lightbox open: freeze the document behind it (see lib/scrollLock.ts). */
+html.ph-scroll-locked,
+html.ph-scroll-locked body {
+  overflow: hidden;
+  overscroll-behavior: none;
 }

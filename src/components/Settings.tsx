@@ -1,28 +1,24 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, FolderInput, FolderPlus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
-import { type Config } from "@/lib/config";
+import { configCommand, loadConfig, updateConfig, useConfig } from "@/lib/config";
 import { shortenPath } from "@/lib/utils";
 
 export function Settings({ onBack }: { onBack: () => void }) {
-  const [targetDirs, setTargetDirs] = useState<string[]>([]);
-  const [lightboxInFullscreen, setLightboxInFullscreen] = useState(true);
-  const [enableRawCouplingDetection, setEnableRawCouplingDetection] = useState(true);
+  const config = useConfig();
+  const targetDirs = config?.targetDirectories ?? [];
+  const lightboxInFullscreen = config?.lightboxInFullscreen ?? true;
+  const enableRawCouplingDetection = config?.enableRawCouplingDetection ?? true;
   const [picking, setPicking] = useState(false);
   const [savingFullscreenPref, setSavingFullscreenPref] = useState(false);
   const [savingRawCouplingPref, setSavingRawCouplingPref] = useState(false);
 
   useEffect(() => {
-    invoke<Config>("get_config").then((cfg) => {
-      setTargetDirs(cfg.targetDirectories);
-      setLightboxInFullscreen(cfg.lightboxInFullscreen);
-      setEnableRawCouplingDetection(cfg.enableRawCouplingDetection);
-    });
+    void loadConfig().catch(() => {});
   }, []);
 
   async function addTarget() {
@@ -31,10 +27,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
     try {
       const selected = await open({ directory: true, multiple: false });
       if (typeof selected === "string") {
-        const cfg = await invoke<Config>("add_target_directory", { dir: selected });
-        setTargetDirs(cfg.targetDirectories);
-        setLightboxInFullscreen(cfg.lightboxInFullscreen);
-        setEnableRawCouplingDetection(cfg.enableRawCouplingDetection);
+        await configCommand("add_target_directory", { dir: selected });
       }
     } finally {
       setPicking(false);
@@ -42,23 +35,17 @@ export function Settings({ onBack }: { onBack: () => void }) {
   }
 
   async function removeTarget(dir: string) {
-    const cfg = await invoke<Config>("remove_target_directory", { dir });
-    setTargetDirs(cfg.targetDirectories);
-    setLightboxInFullscreen(cfg.lightboxInFullscreen);
-    setEnableRawCouplingDetection(cfg.enableRawCouplingDetection);
+    await configCommand("remove_target_directory", { dir });
   }
 
+  // `updateConfig` flips the cached value at once and restores it if saving fails.
   async function toggleLightboxFullscreen(next: boolean) {
     if (savingFullscreenPref) return;
     setSavingFullscreenPref(true);
-    setLightboxInFullscreen(next);
     try {
-      const cfg = await invoke<Config>("get_config");
-      const updated: Config = { ...cfg, lightboxInFullscreen: next };
-      await invoke("save_config", { config: updated });
+      await updateConfig({ lightboxInFullscreen: next });
     } catch {
-      // Revert the UI toggle on save failure so it matches disk state.
-      setLightboxInFullscreen((prev) => !prev);
+      /* reverted by updateConfig */
     } finally {
       setSavingFullscreenPref(false);
     }
@@ -67,13 +54,10 @@ export function Settings({ onBack }: { onBack: () => void }) {
   async function toggleRawCouplingDetection(next: boolean) {
     if (savingRawCouplingPref) return;
     setSavingRawCouplingPref(true);
-    setEnableRawCouplingDetection(next);
     try {
-      const cfg = await invoke<Config>("get_config");
-      const updated: Config = { ...cfg, enableRawCouplingDetection: next };
-      await invoke("save_config", { config: updated });
+      await updateConfig({ enableRawCouplingDetection: next });
     } catch {
-      setEnableRawCouplingDetection((prev) => !prev);
+      /* reverted by updateConfig */
     } finally {
       setSavingRawCouplingPref(false);
     }

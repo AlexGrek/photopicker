@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { VirtuosoMasonry } from "@virtuoso.dev/masonry";
 import { ArrowLeft, CalendarDays, Check, ChevronLeft, ChevronRight, ChevronDown, Ellipsis, Film, Flag, ImageOff, Play, SlidersHorizontal, SquareCheck, Star, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { listImages, thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import {
+  invalidateDirectoryPreviews,
   listDirectories,
   PREVIEW_RECURSION_LIMIT,
   type BrowserItem,
@@ -12,8 +13,14 @@ import {
   itemPath,
   isPhotoItem,
 } from "@/lib/browse";
-import { type Config } from "@/lib/config";
+import { loadConfig, getConfig } from "@/lib/config";
 import { EMPTY_MARK, clearFlags, clearStars, getMarks, writeStarsToExif, type Mark } from "@/lib/marks";
+import { bucketByDay, dateFromDayKey, dayKeyForEntry, dayKeyFromTimestamp, DAY_LABEL_FORMAT, formatCreated, MONTH_LABEL_FORMAT, monthStart, WEEKDAY_LABELS } from "@/lib/dates";
+import { buildRawCouplingMeta, detectRawCouplingBySample, stemKey } from "@/lib/rawCoupling";
+import { isShotSort, SORT_LABEL, sortEntries, type SortMode } from "@/lib/sort";
+import { useGamepad } from "@/lib/gamepad";
+import { hasCommandModifier, useDismiss, useLatest, useWindowKeydown } from "@/lib/hooks";
+import { baseName, compareNames, plural, toggleInSet } from "@/lib/utils";
 import { BrowserTile, type BrowserTileContext } from "./BrowserTile";
 import { VideoThumb } from "./VideoThumb";
 import { DirectoryListRow } from "./DirectoryTile";
@@ -23,25 +30,23 @@ import { LightboxCloseFlight } from "./LightboxCloseFlight";
 import { findPhotoElement, photoPathAttr, scrollToPhoto } from "@/lib/photoScroll";
 
 /** Pick a column count that keeps tiles a comfortable size at any window width. */
+function columnsForWidth(w: number): number {
+  if (w < 480) return 2;
+  if (w < 768) return 3;
+  if (w < 1100) return 4;
+  if (w < 1500) return 5;
+  return 6;
+}
+
 function useColumnCount(): number {
-  const [count, setCount] = useState(4);
+  const [count, setCount] = useState(() => columnsForWidth(window.innerWidth));
   useEffect(() => {
-    const calc = () => {
-      const w = window.innerWidth;
-      if (w < 480) setCount(2);
-      else if (w < 768) setCount(3);
-      else if (w < 1100) setCount(4);
-      else if (w < 1500) setCount(5);
-      else setCount(6);
-    };
-    calc();
+    const calc = () => setCount(columnsForWidth(window.innerWidth));
     window.addEventListener("resize", calc);
     return () => window.removeEventListener("resize", calc);
   }, []);
   return count;
 }
-
-const TileItem = BrowserTile;
 
 /** List-row thumbnail: a `thumb://` image for photos, a client poster + ▶ badge for videos. */
 function ListThumb({ entry }: { entry: ImageEntry }) {
@@ -66,132 +71,8 @@ function ListThumb({ entry }: { entry: ImageEntry }) {
     />
   );
 }
+
 type ViewMode = "masonry" | "grid" | "list";
-type SortMode = "nameAsc" | "nameDesc" | "createdDesc" | "createdAsc" | "shotDesc" | "shotAsc";
-const SORT_LABEL: Record<SortMode, string> = {
-  nameAsc: "Name A-Z",
-  nameDesc: "Name Z-A",
-  createdDesc: "Created newest",
-  createdAsc: "Created oldest",
-  shotDesc: "Shot date newest (slow)",
-  shotAsc: "Shot date oldest (slow)",
-};
-const CREATED_DATE_FORMAT = new Intl.DateTimeFormat(undefined, {
-  year: "numeric",
-  month: "short",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-});
-const DAY_LABEL_FORMAT = new Intl.DateTimeFormat(undefined, {
-  year: "numeric",
-  month: "short",
-  day: "2-digit",
-});
-const MONTH_LABEL_FORMAT = new Intl.DateTimeFormat(undefined, {
-  year: "numeric",
-  month: "long",
-});
-const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-function dirName(dir: string): string {
-  const parts = dir.replace(/[/\\]+$/, "").split(/[/\\]/);
-  return parts[parts.length - 1] || dir;
-}
-
-function formatCreated(entry: ImageEntry): string {
-  if (entry.created == null) return "Created date unavailable";
-  return CREATED_DATE_FORMAT.format(new Date(entry.created));
-}
-
-function dayKeyFromTimestamp(ts: number): string {
-  const d = new Date(ts);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function dateFromDayKey(dayKey: string): Date {
-  const [y, m, d] = dayKey.split("-").map(Number);
-  return new Date(y, (m || 1) - 1, d || 1);
-}
-
-function monthStart(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
-}
-
-function monthKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-function timestampForFilter(entry: ImageEntry): number | null {
-  return entry.created ?? entry.modified ?? null;
-}
-
-/** Converts an EXIF shot-date key (YYYYMMDDhhmmss) into a comparable local epoch (ms). */
-function shotKeyToEpoch(key: number): number {
-  const s = String(key).padStart(14, "0");
-  const y = Number(s.slice(0, 4));
-  const mo = Number(s.slice(4, 6));
-  const d = Number(s.slice(6, 8));
-  const h = Number(s.slice(8, 10));
-  const mi = Number(s.slice(10, 12));
-  const se = Number(s.slice(12, 14));
-  return new Date(y, (mo || 1) - 1, d || 1, h, mi, se).getTime();
-}
-
-/**
- * A single, comparable timestamp (epoch ms) for the shot-date sort. Photos use their
- * EXIF shot date when available; videos (which carry no EXIF) fall back to the file's
- * creation time so they interleave organically with photos rather than clumping.
- * Returns -1 when nothing is known, matching the "unknown sorts last/first" behaviour.
- */
-function shotSortValue(entry: ImageEntry, shotDateByPath: Record<string, number>): number {
-  const key = shotDateByPath[entry.path];
-  if (key != null) return shotKeyToEpoch(key);
-  if (entry.video) return entry.created ?? entry.modified ?? -1;
-  return -1;
-}
-
-function stemKey(name: string): string {
-  return name.replace(/\.[^.]+$/, "").toLocaleLowerCase();
-}
-
-function isJpegName(name: string): boolean {
-  return /\.(jpg|jpeg|jpe|jfif)$/i.test(name);
-}
-
-function hasJpegRawPair(items: ImageEntry[]): boolean {
-  const groups = new Map<string, { raw: boolean; jpeg: boolean }>();
-  for (const item of items) {
-    const key = stemKey(item.name);
-    const entry = groups.get(key) ?? { raw: false, jpeg: false };
-    if (item.raw) entry.raw = true;
-    if (isJpegName(item.name)) entry.jpeg = true;
-    groups.set(key, entry);
-    if (entry.raw && entry.jpeg) return true;
-  }
-  return false;
-}
-
-// Heuristic requested by product: sample 2 files from the start and 4 from the
-// end; if at least one JPEG/RAW pair exists there, auto-enable raw coupling.
-function detectRawCouplingBySample(items: ImageEntry[]): boolean {
-  if (items.length === 0) return false;
-  const sampled: ImageEntry[] = [];
-  const seen = new Set<string>();
-  const pushUnique = (entry: ImageEntry | undefined) => {
-    if (!entry || seen.has(entry.path)) return;
-    seen.add(entry.path);
-    sampled.push(entry);
-  };
-  for (const entry of items.slice(0, 2)) pushUnique(entry);
-  for (const entry of items.slice(Math.max(0, items.length - 4))) pushUnique(entry);
-  return hasJpegRawPair(sampled);
-}
 
 /** Stable, varied aspect ratios so the loading skeleton reads as a masonry, not a grid. */
 const SKELETON_ASPECTS = [1.3, 0.74, 1, 1.5, 0.8, 1.2, 0.66, 1.05, 1.4, 0.9, 1.15, 0.7];
@@ -265,9 +146,13 @@ export function Gallery({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
   const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  /** True while the selection bar has its own chooser / confirmation open (it then owns the keys and pad). */
+  const [selectionBarModal, setSelectionBarModal] = useState(false);
   /** Photo paths successfully copied or moved during this gallery visit. */
   const [sessionSentPaths, setSessionSentPaths] = useState<Set<string>>(() => new Set());
   const [ghostPath, setGhostPath] = useState<string | null>(null);
+  /** Item carrying the keyboard/gamepad focus ring (null until the user navigates). */
+  const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const [closeFlight, setCloseFlight] = useState<{
     fromRect: DOMRect;
     toRect: DOMRect;
@@ -303,6 +188,7 @@ export function Gallery({
     setSelectedPaths(new Set());
     setSelectionMenuOpen(false);
     setGhostPath(null);
+    setFocusedPath(null);
     setCloseFlight(null);
     setMarks({});
     setShotDateByPath({});
@@ -311,11 +197,11 @@ export function Gallery({
     Promise.all([
       listImages(currentDir),
       listDirectories(currentDir),
-      invoke<Config>("get_config").catch(() => ({ enableRawCouplingDetection: true } as Config)),
+      loadConfig().catch(() => getConfig()),
     ]).then(
       ([list, dirs, cfg]) => {
         if (!alive) return;
-        const detectionEnabled = cfg.enableRawCouplingDetection;
+        const detectionEnabled = cfg?.enableRawCouplingDetection ?? true;
         setEnableRawCouplingDetection(detectionEnabled);
         setDirectories(dirs);
         setEntries(list);
@@ -342,7 +228,7 @@ export function Gallery({
     return () => clearTimeout(t);
   }, [galleryNotice]);
 
-  const shotSort = sortMode === "shotDesc" || sortMode === "shotAsc";
+  const shotSort = isShotSort(sortMode);
   const shotDateLoadKey = `${currentDir}:${rawCoupling ? "coupled" : "plain"}`;
   useEffect(() => {
     if (!shotSort) return;
@@ -367,30 +253,7 @@ export function Gallery({
 
   const filtersActive = minRating > 0 || flaggedOnly || selectedDay !== null;
 
-  const rawCouplingMeta = useMemo(() => {
-    const hiddenRawPaths = new Set<string>();
-    const actionPathsByPath: Record<string, string[]> = {};
-    if (!entries || entries.length === 0) return { hiddenRawPaths, actionPathsByPath };
-
-    const groups = new Map<string, ImageEntry[]>();
-    for (const entry of entries) {
-      const key = stemKey(entry.name);
-      const group = groups.get(key);
-      if (group) group.push(entry);
-      else groups.set(key, [entry]);
-    }
-
-    for (const group of groups.values()) {
-      const raws = group.filter((e) => e.raw);
-      const jpegs = group.filter((e) => isJpegName(e.name));
-      if (raws.length === 0 || jpegs.length === 0) continue;
-      for (const raw of raws) hiddenRawPaths.add(raw.path);
-      const coupledPaths = group.map((e) => e.path);
-      for (const jpeg of jpegs) actionPathsByPath[jpeg.path] = coupledPaths;
-    }
-
-    return { hiddenRawPaths, actionPathsByPath };
-  }, [entries]);
+  const rawCouplingMeta = useMemo(() => buildRawCouplingMeta(entries), [entries]);
 
   const baseEntries = useMemo(() => {
     if (!entries) return [];
@@ -398,26 +261,23 @@ export function Gallery({
     return entries.filter((e) => !rawCouplingMeta.hiddenRawPaths.has(e.path));
   }, [entries, rawCoupling, rawCouplingMeta]);
 
+  // Sorting is the expensive step and depends on neither the marks nor the filters,
+  // so it runs first: rating or flagging a photo only re-filters, never re-sorts.
+  const sortedBase = useMemo(
+    () => sortEntries(baseEntries, sortMode, shotDateByPath),
+    [baseEntries, sortMode, shotDateByPath],
+  );
+
   const byMarkFilter = useMemo<ImageEntry[]>(() => {
-    return baseEntries.filter((e) => {
+    if (minRating === 0 && !flaggedOnly) return sortedBase;
+    return sortedBase.filter((e) => {
       const m = marks[e.name] ?? EMPTY_MARK;
       if (flaggedOnly && !m.flag) return false;
       return m.rating >= minRating;
     });
-  }, [baseEntries, marks, minRating, flaggedOnly]);
+  }, [sortedBase, marks, minRating, flaggedOnly]);
 
-  const dateBuckets = useMemo(() => {
-    const buckets = new Map<string, { count: number; preview: ImageEntry }>();
-    for (const entry of byMarkFilter) {
-      const ts = timestampForFilter(entry);
-      if (ts == null) continue;
-      const key = dayKeyFromTimestamp(ts);
-      const prev = buckets.get(key);
-      if (prev) prev.count += 1;
-      else buckets.set(key, { count: 1, preview: entry });
-    }
-    return buckets;
-  }, [byMarkFilter]);
+  const dateBuckets = useMemo(() => bucketByDay(byMarkFilter), [byMarkFilter]);
 
   const dayRows = useMemo(
     () =>
@@ -429,46 +289,15 @@ export function Gallery({
 
   // The photos actually shown — the grid and the lightbox both navigate this list,
   // so `openIndex` always indexes the filtered photo set (directories are separate).
-  const visiblePhotos = useMemo<ImageEntry[]>(() => {
-    const filtered = selectedDay
-      ? byMarkFilter.filter((entry) => {
-          const ts = timestampForFilter(entry);
-          return ts != null && dayKeyFromTimestamp(ts) === selectedDay;
-        })
-      : byMarkFilter;
-    if (filtered.length <= 1) return filtered;
-    const sorted = [...filtered];
-    sorted.sort((a, b) => {
-      if (sortMode === "shotDesc" || sortMode === "shotAsc") {
-        const aShot = shotSortValue(a, shotDateByPath);
-        const bShot = shotSortValue(b, shotDateByPath);
-        if (sortMode === "shotDesc") {
-          return bShot - aShot || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-        }
-        return aShot - bShot || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      }
-      if (sortMode === "nameAsc") return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      if (sortMode === "nameDesc") return b.name.localeCompare(a.name, undefined, { sensitivity: "base" });
-      const aCreated = a.created ?? -1;
-      const bCreated = b.created ?? -1;
-      if (sortMode === "createdDesc") {
-        return bCreated - aCreated || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      }
-      return aCreated - bCreated || a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-    });
-    return sorted;
-  }, [byMarkFilter, selectedDay, sortMode, shotDateByPath]);
+  const visiblePhotos = useMemo<ImageEntry[]>(
+    () => (selectedDay ? byMarkFilter.filter((e) => dayKeyForEntry(e) === selectedDay) : byMarkFilter),
+    [byMarkFilter, selectedDay],
+  );
 
   const visibleDirectories = useMemo<DirectoryEntry[]>(() => {
     if (!directories) return [];
-    const sorted = [...directories];
-    sorted.sort((a, b) => {
-      if (sortMode === "nameDesc") {
-        return b.name.localeCompare(a.name, undefined, { sensitivity: "base" });
-      }
-      return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-    });
-    return sorted;
+    const dirSign = sortMode === "nameDesc" ? -1 : 1;
+    return [...directories].sort((a, b) => dirSign * compareNames(a.name, b.name));
   }, [directories, sortMode]);
 
   const visibleItems = useMemo<BrowserItem[]>(() => {
@@ -489,6 +318,20 @@ export function Gallery({
     return map;
   }, [visiblePhotos]);
 
+  // Position of every item in `visibleItems` (folders first), for focus movement.
+  const itemIndexByPath = useMemo(() => {
+    const map = new Map<string, number>();
+    visibleItems.forEach((item, i) => map.set(itemPath(item), i));
+    return map;
+  }, [visibleItems]);
+
+  // Latest values for callbacks that must keep a stable identity.
+  const visiblePhotosRef = useLatest(visiblePhotos);
+  const visibleItemsRef = useLatest(visibleItems);
+  const photoIndexByPathRef = useLatest(photoIndexByPath);
+  const itemIndexByPathRef = useLatest(itemIndexByPath);
+  const currentDirRef = useLatest(currentDir);
+
   // Filtering can drastically shrink the list; with window-scroll virtualization,
   // keeping an old deep scroll offset may leave the viewport beyond the new data.
   // Reset to top whenever the filter state changes.
@@ -496,71 +339,26 @@ export function Gallery({
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [minRating, flaggedOnly, selectedDay, sortMode, viewMode, rawCoupling, currentDir]);
 
-  useEffect(() => {
-    if (!browseMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (browseMenuRef.current && !browseMenuRef.current.contains(e.target as Node)) {
-        setBrowseMenuOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [browseMenuOpen]);
+  const closeBrowseMenu = useCallback(() => setBrowseMenuOpen(false), []);
+  const closeActionMenu = useCallback(() => setActionMenuOpen(false), []);
+  const closeDateDrawer = useCallback(() => setDateDrawerOpen(false), []);
+  const closeSelectionMenu = useCallback(() => setSelectionMenuOpen(false), []);
+  useDismiss(browseMenuRef, browseMenuOpen, closeBrowseMenu);
+  useDismiss(actionMenuRef, actionMenuOpen, closeActionMenu);
+  useDismiss(dateDrawerRef, dateDrawerOpen, closeDateDrawer);
+  useDismiss(selectionMenuRef, selectionMenuOpen, closeSelectionMenu);
 
-  useEffect(() => {
-    if (!actionMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (actionMenuRef.current && !actionMenuRef.current.contains(e.target as Node)) {
-        setActionMenuOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [actionMenuOpen]);
-
-  useEffect(() => {
-    if (!dateDrawerOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (dateDrawerRef.current && !dateDrawerRef.current.contains(e.target as Node)) {
-        setDateDrawerOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDateDrawerOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [dateDrawerOpen]);
-
-  useEffect(() => {
-    if (!selectionMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (selectionMenuRef.current && !selectionMenuRef.current.contains(e.target as Node)) {
-        setSelectionMenuOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [selectionMenuOpen]);
-
-  // Drop selections that are no longer visible after filter/sort changes.
+  // Drop selections (and focus) that are no longer visible after filter/sort changes.
   useEffect(() => {
     setSelectedPaths((prev) => {
       if (prev.size === 0) return prev;
-      const visiblePaths = new Set(visibleItems.map(itemPath));
-      let changed = false;
       const next = new Set<string>();
-      for (const path of prev) {
-        if (visiblePaths.has(path)) next.add(path);
-        else changed = true;
-      }
-      return changed ? next : prev;
+      for (const path of prev) if (itemIndexByPath.has(path)) next.add(path);
+      return next.size === prev.size ? prev : next;
     });
-  }, [visibleItems]);
+    setFocusedPath((prev) => (prev !== null && !itemIndexByPath.has(prev) ? null : prev));
+  }, [itemIndexByPath]);
+
   // Once the directory's entries are in, jump to the OS-opened file — exactly once
   // per requested file. Clears any active filter first so the file always shows.
   useEffect(() => {
@@ -585,10 +383,11 @@ export function Gallery({
     }
   }, [initialFile, entries, visiblePhotos, minRating, flaggedOnly, selectedDay, rawCoupling]);
 
-  function openDirectory(path: string) {
+  const openDirectory = useCallback((path: string) => {
     setOpenIndex(null);
+    setFocusedPath(null);
     setBrowseStack((prev) => [...prev, path]);
-  }
+  }, []);
 
   function goUpOneDirectory() {
     setOpenIndex(null);
@@ -600,26 +399,31 @@ export function Gallery({
     else onBack();
   }
 
+  const openPhoto = useCallback(
+    (path: string) => {
+      const i = photoIndexByPathRef.current.get(path);
+      if (i !== undefined) setOpenIndex(i);
+    },
+    [photoIndexByPathRef],
+  );
+
+  const toggleSelectedPath = useCallback((path: string) => {
+    setSelectedPaths((prev) => toggleInSet(prev, path));
+  }, []);
+
   const context = useMemo<BrowserTileContext>(
     () => ({
-      onOpen: (i) => setOpenIndex(i),
       mode: viewMode === "grid" ? "grid" : "masonry",
       selectionMode,
       selectedPaths,
       ghostPath,
+      focusedPath,
       previewDepth,
-      onToggleSelect: (path) => {
-        setSelectedPaths((prev) => {
-          const next = new Set(prev);
-          if (next.has(path)) next.delete(path);
-          else next.add(path);
-          return next;
-        });
-      },
-      photoIndexForPath: (path) => photoIndexByPath.get(path) ?? -1,
+      onOpenPhoto: openPhoto,
       onOpenDirectory: openDirectory,
+      onToggleSelect: toggleSelectedPath,
     }),
-    [viewMode, selectionMode, selectedPaths, ghostPath, visiblePhotos, previewDepth, photoIndexByPath],
+    [viewMode, selectionMode, selectedPaths, ghostPath, focusedPath, previewDepth, openPhoto, openDirectory, toggleSelectedPath],
   );
 
   const selectedItems = useMemo(
@@ -633,11 +437,12 @@ export function Gallery({
     setOpenIndex(null);
   }
 
-  function clearSelection() {
+  const clearSelection = useCallback(() => {
     setSelectedPaths(new Set());
     setSelectionMode(false);
     setSelectionMenuOpen(false);
-  }
+    setSelectionBarModal(false);
+  }, []);
 
   function toggleSelectionMode() {
     if (selectionMode || hasSelection) clearSelection();
@@ -680,13 +485,13 @@ export function Gallery({
     setSelectionMenuOpen(false);
   }
 
-  function noteSessionSent(paths: string[]) {
+  const noteSessionSent = useCallback((paths: string[]) => {
     setSessionSentPaths((prev) => {
       const next = new Set(prev);
       for (const path of paths) next.add(path);
       return next;
     });
-  }
+  }, []);
 
   function selectSessionSent() {
     setSelectionMode(true);
@@ -698,74 +503,59 @@ export function Gallery({
 
   function toggleListSelection(path: string) {
     if (!selectionMode && !selectedPaths.has(path)) enterSelectionMode();
-    setSelectedPaths((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
+    toggleSelectedPath(path);
   }
-
-  function toggleSelectedPath(path: string) {
-    setSelectedPaths((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }
-
-  // Latest visible list, so back-to-back removals (fired from async callbacks) never
-  // operate on a stale list and resurrect an already-removed photo.
-  const visiblePhotosRef = useRef(visiblePhotos);
-  visiblePhotosRef.current = visiblePhotos;
-  const visibleItemsRef = useRef(visibleItems);
-  visibleItemsRef.current = visibleItems;
-  const entriesRef = useRef(entries);
-  entriesRef.current = entries;
 
   // A photo left this folder (moved or deleted): drop its tile and keep the lightbox
   // on whatever slides into its place (closing if nothing visible is left).
-  function handleRemoved(paths: string[]) {
-    const removed = new Set(paths);
-    setSelectedPaths((prev) => {
-      if (prev.size === 0) return prev;
-      let changed = false;
-      const next = new Set<string>();
-      for (const path of prev) {
-        if (removed.has(path)) changed = true;
-        else next.add(path);
-      }
-      return changed ? next : prev;
-    });
-    const full = entriesRef.current;
-    if (full) {
-      const remaining = full.filter((e) => !removed.has(e.path));
-      entriesRef.current = remaining;
-      setEntries(remaining);
-    }
-    setDirectories((prev) => {
-      if (!prev) return prev;
-      const remaining = prev.filter((d) => !removed.has(d.path));
-      return remaining.length === prev.length ? prev : remaining;
-    });
-    const vis = visiblePhotosRef.current;
-    setOpenIndex((idx) => {
-      if (idx === null) return idx;
-      const current = vis[idx];
-      const remainingVisible = vis.filter((e) => !removed.has(e.path));
-      if (remainingVisible.length === 0) return null;
-      if (current && removed.has(current.path)) return Math.min(idx, remainingVisible.length - 1);
-      const removedBefore = vis.slice(0, idx).reduce((n, e) => n + (removed.has(e.path) ? 1 : 0), 0);
-      return Math.max(0, idx - removedBefore);
-    });
-  }
+  const handleRemoved = useCallback(
+    (paths: string[]) => {
+      const removed = new Set(paths);
+      invalidateDirectoryPreviews(); // a cached folder preview may show a file that is gone
+      setSelectedPaths((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set<string>();
+        for (const path of prev) if (!removed.has(path)) next.add(path);
+        return next.size === prev.size ? prev : next;
+      });
+      setEntries((prev) => (prev ? prev.filter((e) => !removed.has(e.path)) : prev));
+      setDirectories((prev) => {
+        if (!prev) return prev;
+        const remaining = prev.filter((d) => !removed.has(d.path));
+        return remaining.length === prev.length ? prev : remaining;
+      });
+      // Back-to-back removals fire from async callbacks; the ref always holds the
+      // latest visible list, so a stale list can't resurrect an already-removed photo.
+      const vis = visiblePhotosRef.current;
+      setOpenIndex((idx) => {
+        if (idx === null) return idx;
+        const current = vis[idx];
+        const remainingVisible = vis.filter((e) => !removed.has(e.path));
+        if (remainingVisible.length === 0) return null;
+        if (current && removed.has(current.path)) return Math.min(idx, remainingVisible.length - 1);
+        const removedBefore = vis.slice(0, idx).reduce((n, e) => n + (removed.has(e.path) ? 1 : 0), 0);
+        return Math.max(0, idx - removedBefore);
+      });
+    },
+    [visiblePhotosRef],
+  );
 
   // Re-read marks after culling in the lightbox so the filters reflect new ratings/flags.
-  function closeLightbox() {
+  const refreshMarks = useCallback(() => {
+    const forDir = currentDirRef.current;
+    getMarks(forDir).then(
+      (m) => {
+        // The user may have navigated to another folder while this was in flight.
+        if (currentDirRef.current === forDir) setMarks(m);
+      },
+      () => {},
+    );
+  }, [currentDirRef]);
+
+  const closeLightbox = useCallback(() => {
     setOpenIndex(null);
-    getMarks(currentDir).then(setMarks, () => {});
-  }
+    refreshMarks();
+  }, [refreshMarks]);
 
   const animateCloseLightbox = useCallback(
     async (info: {
@@ -774,11 +564,14 @@ export function Gallery({
       getSourceRect: () => DOMRect | null;
       imageSrc: string;
     }) => {
-      const { path, index, getSourceRect, imageSrc } = info;
-      const total = visiblePhotosRef.current.length;
+      const { path, getSourceRect, imageSrc } = info;
+      // The tile's place among *all* grid items — folders come first, so the photo
+      // index alone would aim the scroll estimate too high.
+      const itemIndex = itemIndexByPathRef.current.get(path) ?? -1;
+      const total = visibleItemsRef.current.length;
 
       setGhostPath(path);
-      await scrollToPhoto(path, index, total);
+      await scrollToPhoto(path, itemIndex, total);
 
       const targetRect = findPhotoElement(path)?.getBoundingClientRect() ?? null;
       const sourceRect = getSourceRect();
@@ -792,28 +585,23 @@ export function Gallery({
       setCloseFlight({ fromRect: sourceRect, toRect: targetRect, imageSrc, path });
       setOpenIndex(null);
     },
-    [dir],
+    [closeLightbox, itemIndexByPathRef, visibleItemsRef],
   );
 
   function finishCloseFlight() {
     setCloseFlight(null);
     setGhostPath(null);
-    getMarks(currentDir).then(setMarks, () => {});
+    refreshMarks();
   }
 
-  function handleEntryUpdated(path: string, modified: number | null) {
-    setEntries((prev) => {
-      if (!prev) return prev;
-      const next = prev.map((e) => (e.path === path ? { ...e, modified } : e));
-      entriesRef.current = next;
-      return next;
-    });
-  }
+  const handleEntryUpdated = useCallback((path: string, modified: number | null) => {
+    setEntries((prev) => (prev ? prev.map((e) => (e.path === path ? { ...e, modified } : e)) : prev));
+  }, []);
 
   const monthStartDate = monthStart(calendarMonth);
   const monthStartWeekday = monthStartDate.getDay();
   const monthDays = new Date(monthStartDate.getFullYear(), monthStartDate.getMonth() + 1, 0).getDate();
-  const selectedDayMonthKey = selectedDay ? monthKey(dateFromDayKey(selectedDay)) : null;
+  const selectedDayMonthKey = selectedDay ? selectedDay.slice(0, 7) : null;
 
   function jumpMonth(delta: number) {
     setCalendarMonth((prev) => monthStart(new Date(prev.getFullYear(), prev.getMonth() + delta, 1)));
@@ -824,9 +612,9 @@ export function Gallery({
     setBrowseMenuOpen(false);
   }
 
-  function showNotice(text: string) {
+  const showNotice = useCallback((text: string) => {
     setGalleryNotice({ id: Date.now(), text });
-  }
+  }, []);
 
   async function runBulkAction(kind: "flags" | "stars" | "write") {
     if (busyAction) return;
@@ -834,14 +622,12 @@ export function Gallery({
     try {
       if (kind === "flags") {
         const changed = await clearFlags(currentDir);
-        const fresh = await getMarks(currentDir);
-        setMarks(fresh);
-        showNotice(`Removed flags from ${changed} photo${changed === 1 ? "" : "s"}`);
+        setMarks(await getMarks(currentDir));
+        showNotice(`Removed flags from ${plural(changed, "photo")}`);
       } else if (kind === "stars") {
         const changed = await clearStars(currentDir);
-        const fresh = await getMarks(currentDir);
-        setMarks(fresh);
-        showNotice(`Removed stars from ${changed} photo${changed === 1 ? "" : "s"}`);
+        setMarks(await getMarks(currentDir));
+        showNotice(`Removed stars from ${plural(changed, "photo")}`);
       } else {
         const summary = await writeStarsToExif(currentDir);
         showNotice(
@@ -859,6 +645,73 @@ export function Gallery({
   const listingLoaded = entries !== null && directories !== null;
   const folderCount = directories?.length ?? 0;
   const hasBrowsableContent = listingLoaded && (folderCount > 0 || baseEntries.length > 0);
+
+  // ---- Keyboard / gamepad navigation of the grid ---------------------------
+  // Active only while nothing covers the grid: not under the lightbox or the
+  // close animation, not with a popover open, and not while the selection bar has
+  // a chooser or confirmation up (it owns the keys and pad then).
+  const navActive =
+    openIndex === null &&
+    closeFlight === null &&
+    !dateDrawerOpen &&
+    !browseMenuOpen &&
+    !actionMenuOpen &&
+    !selectionMenuOpen &&
+    !selectionBarModal &&
+    listingLoaded &&
+    visibleItems.length > 0;
+
+  function moveFocus(delta: number) {
+    const items = visibleItemsRef.current;
+    if (items.length === 0) return;
+    const current = focusedPath !== null ? (itemIndexByPathRef.current.get(focusedPath) ?? -1) : -1;
+    const next = current < 0 ? 0 : Math.min(items.length - 1, Math.max(0, current + delta));
+    const path = itemPath(items[next]);
+    setFocusedPath(path);
+    void scrollToPhoto(path, next, items.length);
+  }
+
+  const rowStep = viewMode === "list" ? 1 : columnCount;
+
+  /** Enter / A on the focused item: open the folder or photo (or toggle it in selection mode). */
+  function activateFocused() {
+    if (focusedPath === null) return moveFocus(0);
+    const item = visibleItemsRef.current[itemIndexByPathRef.current.get(focusedPath) ?? -1];
+    if (!item) return;
+    if (selectionMode) toggleSelectedPath(focusedPath);
+    else if (isPhotoItem(item)) openPhoto(focusedPath);
+    else openDirectory(focusedPath);
+  }
+
+  useWindowKeydown((e) => {
+    if (hasCommandModifier(e)) return;
+    // Real controls (buttons, inputs) keep their own Enter/Space behaviour.
+    const onControl = e.target instanceof HTMLElement && /^(BUTTON|INPUT|SELECT|TEXTAREA|A)$/.test(e.target.tagName);
+    if (e.key === "ArrowLeft") moveFocus(-1);
+    else if (e.key === "ArrowRight") moveFocus(1);
+    else if (e.key === "ArrowUp") moveFocus(-rowStep);
+    else if (e.key === "ArrowDown") moveFocus(rowStep);
+    else if (e.key === "Enter" && !onControl) activateFocused();
+    else if (e.key === " " && !onControl && focusedPath !== null) toggleSelectedPath(focusedPath);
+    else if (e.key === "Escape") {
+      if (hasSelection || selectionMode) clearSelection();
+      else handleHeadBack();
+    } else return;
+    e.preventDefault();
+  }, navActive);
+
+  useGamepad((button) => {
+    // With a selection, A/B belong to the selection bar (confirm / cancel); the
+    // pad then only moves focus, and X toggles the focused item like in the lightbox.
+    if (button === "left") moveFocus(-1);
+    else if (button === "right") moveFocus(1);
+    else if (button === "up") moveFocus(-rowStep);
+    else if (button === "down") moveFocus(rowStep);
+    else if (button === "x" && focusedPath !== null) toggleSelectedPath(focusedPath);
+    else if (hasSelection) return;
+    else if (button === "a") activateFocused();
+    else if (button === "b") handleHeadBack();
+  }, navActive);
 
   return (
     <div className={`ph-gallery${hasSelection ? " ph-gallery-has-selection" : ""}`}>
@@ -879,15 +732,15 @@ export function Gallery({
         </Button>
         <div className="ph-gallery-title">
           <span className="ph-gallery-name" title={currentDir}>
-            {dirName(currentDir)}
+            {baseName(currentDir)}
           </span>
           {listingLoaded ? (
             <span className="ph-gallery-count">
               {filtersActive
-                ? `${visiblePhotos.length} of ${baseEntries.length} photo${baseEntries.length === 1 ? "" : "s"}`
+                ? `${visiblePhotos.length} of ${plural(baseEntries.length, "photo")}`
                 : [
-                    folderCount > 0 ? `${folderCount} folder${folderCount === 1 ? "" : "s"}` : null,
-                    `${baseEntries.length} photo${baseEntries.length === 1 ? "" : "s"}`,
+                    folderCount > 0 ? plural(folderCount, "folder") : null,
+                    plural(baseEntries.length, "photo"),
                   ]
                     .filter(Boolean)
                     .join(", ")}
@@ -1159,16 +1012,19 @@ export function Gallery({
         <ul className="ph-gallery-list">
           {visibleItems.map((item) => {
             if (!isPhotoItem(item)) {
-              const selected = selectedPaths.has(item.path);
               return (
-                <li key={item.path} className="ph-gallery-list-item">
+                <li
+                  key={item.path}
+                  className={`ph-gallery-list-item${focusedPath === item.path ? " ph-gallery-list-item-focused" : ""}`}
+                >
                   <DirectoryListRow
-                    data={item}
+                    path={item.path}
+                    name={item.name}
                     previewDepth={previewDepth}
                     selectionMode={selectionMode}
-                    selected={selected}
+                    selected={selectedPaths.has(item.path)}
                     onOpen={openDirectory}
-                    onToggleSelect={(path) => toggleListSelection(path)}
+                    onToggleSelect={toggleListSelection}
                   />
                 </li>
               );
@@ -1179,7 +1035,7 @@ export function Gallery({
             return (
               <li
                 key={entry.path}
-                className={`ph-gallery-list-item${selected ? " ph-gallery-list-item-selected" : ""}${ghostPath === entry.path ? " ph-gallery-list-item-ghost" : ""}`}
+                className={`ph-gallery-list-item${selected ? " ph-gallery-list-item-selected" : ""}${ghostPath === entry.path ? " ph-gallery-list-item-ghost" : ""}${focusedPath === entry.path ? " ph-gallery-list-item-focused" : ""}`}
               >
                 {selectionMode ? (
                   <div
@@ -1237,7 +1093,7 @@ export function Gallery({
           columnCount={columnCount}
           data={visibleItems}
           context={context}
-          ItemContent={TileItem}
+          ItemContent={BrowserTile}
           className="ph-masonry"
         />
       )}
@@ -1305,7 +1161,7 @@ export function Gallery({
                       className={`ph-date-day${count > 0 ? " ph-date-day-has" : ""}${isSelected ? " ph-date-day-on" : ""}`}
                       disabled={count === 0}
                       onClick={() => pickDay(dayKey)}
-                      title={count > 0 ? `${count} photo${count === 1 ? "" : "s"}` : "No photos"}
+                      title={count > 0 ? plural(count, "photo") : "No photos"}
                     >
                       <span className="ph-date-day-number">{dayNumber}</span>
                       {count > 0 && <span className="ph-date-day-count">{count}</span>}
@@ -1330,7 +1186,7 @@ export function Gallery({
                           pickDay(row.day);
                           setCalendarMonth(monthStart(dateFromDayKey(row.day)));
                         }}
-                        title={`${row.count} photo${row.count === 1 ? "" : "s"}`}
+                        title={plural(row.count, "photo")}
                       >
                         {row.preview.video ? (
                           <span className="ph-date-day-row-thumb ph-date-day-row-thumb-video" aria-hidden>
@@ -1349,7 +1205,7 @@ export function Gallery({
                         <span className="ph-date-day-row-text">
                           <span className="ph-date-day-row-date">{DAY_LABEL_FORMAT.format(dateFromDayKey(row.day))}</span>
                           <span className="ph-date-day-row-count">
-                            {row.count} photo{row.count === 1 ? "" : "s"}
+                            {plural(row.count, "photo")}
                           </span>
                         </span>
                       </button>
@@ -1371,6 +1227,8 @@ export function Gallery({
           onRemoved={handleRemoved}
           onEntryUpdated={handleEntryUpdated}
           onMarksChanged={setMarks}
+          onModalChange={setSelectionBarModal}
+          active={openIndex === null}
           onDone={clearSelection}
           onNotice={showNotice}
           onSessionSent={noteSessionSent}

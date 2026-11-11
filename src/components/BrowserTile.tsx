@@ -1,38 +1,60 @@
 import { type ItemContent } from "@virtuoso.dev/masonry";
 import { type BrowserItem, isPhotoItem } from "@/lib/browse";
 import { DirectoryTile } from "./DirectoryTile";
-import { PhotoTile, type TileContext } from "./PhotoTile";
+import { PhotoTile } from "./PhotoTile";
 
-export type BrowserTileContext = TileContext & {
+/**
+ * Shared data the virtualizer passes to every tile/row. The callbacks must be
+ * referentially stable: the tiles are memoized, and an unstable callback would
+ * re-render every mounted tile on each gallery render.
+ */
+export interface BrowserTileContext {
+  mode: "masonry" | "grid";
+  selectionMode: boolean;
+  selectedPaths: ReadonlySet<string>;
+  /** Tile hidden while the close-flight animation targets it. */
+  ghostPath: string | null;
+  /** Item carrying the keyboard/gamepad focus ring. */
+  focusedPath: string | null;
   previewDepth: number;
-  photoIndexForPath: (path: string) => number;
+  onOpenPhoto: (path: string) => void;
   onOpenDirectory: (path: string) => void;
-};
+  onToggleSelect: (path: string) => void;
+}
 
-export const BrowserTile: ItemContent<BrowserItem, BrowserTileContext> = ({
-  data,
-  context,
-}) => {
+/**
+ * Adapts the virtualizer's `(data, context)` call to the memoized tiles: it
+ * resolves the per-tile booleans here, so a change to the selection or focus
+ * re-renders only the tiles whose own state actually changed.
+ */
+export const BrowserTile: ItemContent<BrowserItem, BrowserTileContext> = ({ data, context }) => {
   if (isPhotoItem(data)) {
-    const photoIndex = context.photoIndexForPath(data.entry.path);
+    const path = data.entry.path;
     return (
       <PhotoTile
-        data={data.entry}
-        index={photoIndex}
-        context={context}
+        key={path}
+        entry={data.entry}
+        grid={context.mode === "grid"}
+        selectionMode={context.selectionMode}
+        selected={context.selectedPaths.has(path)}
+        ghost={context.ghostPath === path}
+        focused={context.focusedPath === path}
+        onOpen={context.onOpenPhoto}
+        onToggleSelect={context.onToggleSelect}
       />
     );
   }
   return (
     <DirectoryTile
-      data={data}
-      context={{
-        previewDepth: context.previewDepth,
-        selectionMode: context.selectionMode,
-        selectedPaths: context.selectedPaths,
-        onOpen: context.onOpenDirectory,
-        onToggleSelect: context.onToggleSelect,
-      }}
+      key={data.path}
+      path={data.path}
+      name={data.name}
+      previewDepth={context.previewDepth}
+      selectionMode={context.selectionMode}
+      selected={context.selectedPaths.has(data.path)}
+      focused={context.focusedPath === data.path}
+      onOpen={context.onOpenDirectory}
+      onToggleSelect={context.onToggleSelect}
     />
   );
 };

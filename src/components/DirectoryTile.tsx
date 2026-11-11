@@ -1,17 +1,10 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Check, Film, Folder } from "lucide-react";
 import { directoryPreview } from "@/lib/browse";
 import { thumbUrl, type ImageEntry } from "@/lib/thumbnails";
 import { photoPathAttr } from "@/lib/photoScroll";
 
-export interface DirectoryTileContext {
-  previewDepth: number;
-  selectionMode: boolean;
-  selectedPaths: ReadonlySet<string>;
-  onOpen: (path: string) => void;
-  onToggleSelect: (path: string) => void;
-}
-
+/** 2×2 mosaic of up to four child previews. The lookup is cached per folder. */
 function DirectoryPreviewGrid({
   path,
   previewDepth,
@@ -71,43 +64,55 @@ function DirectoryPreviewGrid({
  * A masonry/grid cell for a subdirectory. Shows a 2×2 mosaic of up to four child
  * previews (lazy-loaded), cropped to squares with a heavy inset vignette.
  */
-export function DirectoryTile({
-  data,
-  context,
+export const DirectoryTile = memo(function DirectoryTile({
+  path,
+  name,
+  previewDepth,
+  selectionMode,
+  selected,
+  focused,
+  onOpen,
+  onToggleSelect,
 }: {
-  data: { path: string; name: string };
-  context: DirectoryTileContext;
+  path: string;
+  name: string;
+  previewDepth: number;
+  selectionMode: boolean;
+  selected: boolean;
+  /** Keyboard/gamepad focus ring. */
+  focused: boolean;
+  onOpen: (path: string) => void;
+  onToggleSelect: (path: string) => void;
 }) {
-  const selected = context.selectedPaths.has(data.path);
-  const showSelection = context.selectionMode || selected;
+  const showSelection = selectionMode || selected;
 
   function handleMainClick() {
-    if (context.selectionMode) context.onToggleSelect(data.path);
-    else context.onOpen(data.path);
+    if (selectionMode) onToggleSelect(path);
+    else onOpen(path);
   }
 
   return (
     <div className={`ph-cell${selected ? " ph-cell-selected" : ""}`}>
       <div
-        className={`ph-tile ph-dir-tile${selected ? " ph-tile-selected" : ""}`}
-        data-photo-path={photoPathAttr(data.path)}
+        className={`ph-tile ph-dir-tile${selected ? " ph-tile-selected" : ""}${focused ? " ph-tile-focused" : ""}`}
+        data-photo-path={photoPathAttr(path)}
         style={{ aspectRatio: "1 / 1" }}
       >
         <button
           type="button"
           className="ph-tile-hit"
           onClick={handleMainClick}
-          title={data.name}
-          aria-label={selected ? `${data.name} folder (selected)` : `${data.name} folder`}
-          aria-pressed={context.selectionMode ? selected : undefined}
+          title={name}
+          aria-label={selected ? `${name} folder (selected)` : `${name} folder`}
+          aria-pressed={selectionMode ? selected : undefined}
         >
           <div className="ph-dir-preview-wrap" aria-hidden>
-            <DirectoryPreviewGrid path={data.path} previewDepth={context.previewDepth} />
+            <DirectoryPreviewGrid path={path} previewDepth={previewDepth} />
             <div className="ph-dir-vignette" />
           </div>
           <div className="ph-dir-label">
             <Folder className="h-3.5 w-3.5 shrink-0" />
-            <span className="ph-dir-label-text">{data.name}</span>
+            <span className="ph-dir-label-text">{name}</span>
           </div>
         </button>
         {showSelection && (
@@ -118,18 +123,20 @@ export function DirectoryTile({
       </div>
     </div>
   );
-}
+});
 
 /** List-view row for a subdirectory (same 2×2 preview mosaic as grid tiles). */
-export function DirectoryListRow({
-  data,
+export const DirectoryListRow = memo(function DirectoryListRow({
+  path,
+  name,
   previewDepth,
   selectionMode,
   selected,
   onOpen,
   onToggleSelect,
 }: {
-  data: { path: string; name: string };
+  path: string;
+  name: string;
   previewDepth: number;
   selectionMode: boolean;
   selected: boolean;
@@ -137,20 +144,17 @@ export function DirectoryListRow({
   onToggleSelect: (path: string) => void;
 }) {
   function handleMainClick() {
-    if (selectionMode) onToggleSelect(data.path);
-    else onOpen(data.path);
+    if (selectionMode) onToggleSelect(path);
+    else onOpen(path);
   }
 
   return (
-    <div
-      className={`ph-gallery-list-row ph-gallery-list-dir${selected ? " ph-gallery-list-item-selected" : ""}`}
-      data-photo-path={photoPathAttr(data.path)}
-    >
+    <div className="ph-gallery-list-row ph-gallery-list-dir" data-photo-path={photoPathAttr(path)}>
       <button
         type="button"
         className="ph-gallery-list-hit"
         onClick={handleMainClick}
-        title={data.name}
+        title={name}
         aria-pressed={selectionMode ? selected : undefined}
       >
         {selectionMode && (
@@ -159,17 +163,17 @@ export function DirectoryListRow({
           </span>
         )}
         <div className="ph-gallery-list-dir-thumb">
-          <DirectoryPreviewGrid path={data.path} previewDepth={previewDepth} />
+          <DirectoryPreviewGrid path={path} previewDepth={previewDepth} />
           <div className="ph-dir-vignette" />
         </div>
         <span className="ph-gallery-list-text">
           <span className="ph-gallery-list-name">
             <Folder className="ph-gallery-list-dir-icon" />
-            {data.name}
+            {name}
           </span>
           <span className="ph-gallery-list-date">Folder</span>
         </span>
       </button>
     </div>
   );
-}
+});

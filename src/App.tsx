@@ -9,7 +9,8 @@ import { Separator } from "@/components/ui/separator";
 import { Gallery } from "@/components/Gallery";
 import { GamepadControls } from "@/components/GamepadControls";
 import { Settings } from "@/components/Settings";
-import { type Config } from "@/lib/config";
+import { configCommand, loadConfig, type Config } from "@/lib/config";
+import { invalidateDirectoryPreviews } from "@/lib/browse";
 import { shortenPath } from "@/lib/utils";
 
 type View =
@@ -43,11 +44,11 @@ export default function App() {
 
     media.addEventListener("change", onSystemThemeChange);
 
-    void invoke<Config>("get_config").then((cfg) => {
+    void loadConfig().then((cfg) => {
       setRecentDirs(cfg.recentDirectories);
       theme = cfg.theme;
       applyTheme();
-    });
+    }).catch(() => {});
 
     return () => {
       media.removeEventListener("change", onSystemThemeChange);
@@ -72,12 +73,13 @@ export default function App() {
       alive = false;
       unlisten?.();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function openDirectory(dir: string, openFile?: string) {
-    const cfg = await invoke<Config>("push_recent_directory", { dir });
+    const cfg = await configCommand("push_recent_directory", { dir });
     setRecentDirs(cfg.recentDirectories);
+    // A freshly opened location may have changed on disk since it was last browsed.
+    invalidateDirectoryPreviews();
     setView({ kind: "gallery", dir, openFile });
   }
 
@@ -101,7 +103,7 @@ export default function App() {
         initialFile={view.openFile}
         onBack={() => setView({ kind: "menu" })}
         onRemoveUnreachable={async () => {
-          const cfg = await invoke<Config>("remove_recent_directory", { dir: view.dir });
+          const cfg = await configCommand("remove_recent_directory", { dir: view.dir });
           setRecentDirs(cfg.recentDirectories);
           setView({ kind: "menu" });
         }}

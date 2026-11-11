@@ -1,20 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import {
-  Check,
-  Copy,
-  Flag,
-  FolderInput,
-  FolderOutput,
-  FolderSearch,
-  RotateCcw,
-  RotateCw,
-  Trash2,
-  X,
-} from "lucide-react";
-import { type Config, menuIndexForConfig, persistLastTargetDirectory } from "@/lib/config";
+import { useEffect, useState } from "react";
+import { Check, Copy, Flag, FolderOutput, RotateCcw, RotateCw, Trash2, X } from "lucide-react";
 import { useGamepad } from "@/lib/gamepad";
+import { useWindowKeydown } from "@/lib/hooks";
+import { DestinationChooser, useDestinationChooser, type SendMode } from "./DestinationChooser";
 import {
   EMPTY_MARK,
   copyToTarget,
@@ -24,10 +12,9 @@ import {
   setMark,
   type Mark,
 } from "@/lib/marks";
-import { shortenPath } from "@/lib/utils";
+import { baseName, plural, shortenPath } from "@/lib/utils";
 import { type BrowserItem, isPhotoItem } from "@/lib/browse";
 
-type SendMode = "copy" | "move";
 type PendingAction = "delete" | "rotate-ccw" | "rotate-cw" | "flag" | "unflag";
 
 /**
@@ -46,7 +33,13 @@ export function GallerySelectionBar({
   onDone,
   onNotice,
   onSessionSent,
+  onModalChange,
+  active = true,
 }: {
+  /** Reports whether the bar has a chooser or confirmation open (it then owns the keys and pad). */
+  onModalChange?: (open: boolean) => void;
+  /** False while another surface (the lightbox) covers the bar: it must then ignore the gamepad and keys. */
+  active?: boolean;
   dir: string;
   selected: BrowserItem[];
   marks: Record<string, Mark>;
@@ -69,31 +62,22 @@ export function GallerySelectionBar({
   const photoSelected = selected.filter(isPhotoItem);
   const hasPhotos = photoSelected.length > 0;
 
-  const [targets, setTargets] = useState<string[]>([]);
-  const [menuMode, setMenuMode] = useState<SendMode | null>(null);
-  const [menuIndex, setMenuIndex] = useState(0);
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    invoke<Config>("get_config").then(
-      (cfg) => {
-        if (!alive) return;
-        setTargets(cfg.targetDirectories);
-        setMenuIndex(menuIndexForConfig(cfg));
-      },
-      () => {},
-    );
-    return () => {
-      alive = false;
-    };
-  }, []);
+  const chooser = useDestinationChooser((target, mode) => void sendTo(target, mode));
+  const menuMode = chooser.mode;
+  const { close: closeChooser } = chooser;
 
   useEffect(() => {
     setPending(null);
-    setMenuMode(null);
-  }, [count]);
+    closeChooser();
+  }, [count, closeChooser]);
+
+  const modalOpen = menuMode !== null || pending !== null;
+  useEffect(() => {
+    onModalChange?.(modalOpen);
+    return () => onModalChange?.(false);
+  }, [modalOpen, onModalChange]);
 
   const actionPathsFor = (item: BrowserItem) => {
     if (!isPhotoItem(item)) return [item.path];
@@ -114,21 +98,9 @@ export function GallerySelectionBar({
     return out;
   };
 
-  const itemLabel = (count: number) =>
-    `${count} item${count === 1 ? "" : "s"}`;
-
-  const browseIndex = targets.length;
-  const itemCount = targets.length + 1;
-  const selIndex = Math.min(menuIndex, itemCount - 1);
-  const cycleMenu = (delta: number) => {
-    const next = (((menuIndex + delta) % itemCount) + itemCount) % itemCount;
-    setMenuIndex(next);
-    if (next < targets.length) persistLastTargetDirectory(targets[next]);
-  };
+  const itemLabel = (n: number) => plural(n, "item");
 
   async function sendTo(target: string, mode: SendMode) {
-    setMenuMode(null);
-    persistLastTargetDirectory(target);
     const paths = uniqueActionPaths();
     const dest = shortenPath(target);
     setBusy(true);
@@ -141,9 +113,7 @@ export function GallerySelectionBar({
       } else {
         for (const path of paths) await moveToTarget(path, target);
         onSessionSent?.(photoSelected.map((item) => item.entry.path));
-        for (const item of photoSelected) {
-          void setMark(dir, item.entry.name, EMPTY_MARK).catch(() => {});
-        }
+        for (const path of paths) void setMark(dir, baseName(path), EMPTY_MARK).catch(() => {});
         onRemoved(paths);
         onNotice(`Moved ${itemLabel(paths.length)} to ${dest}`);
         onDone();
@@ -155,29 +125,9 @@ export function GallerySelectionBar({
     }
   }
 
-  async function browseAndSend(mode: SendMode) {
-    const picked = await open({ directory: true, multiple: false });
-    if (typeof picked !== "string") return;
-    try {
-      const cfg = await invoke<Config>("add_target_directory", { dir: picked });
-      setTargets(cfg.targetDirectories);
-      const idx = cfg.targetDirectories.findIndex((d) => d === picked);
-      if (idx >= 0) setMenuIndex(idx);
-    } catch {
-      /* one-off send still allowed */
-    }
-    void sendTo(picked, mode);
-  }
-
-  function confirmSelection(mode: SendMode) {
-    if (selIndex === browseIndex) void browseAndSend(mode);
-    else void sendTo(targets[selIndex], mode);
-  }
-
   function requestSend(mode: SendMode) {
     setPending(null);
-    if (menuMode === mode) confirmSelection(mode);
-    else setMenuMode(mode);
+    chooser.request(mode);
   }
 
   async function doDelete() {
@@ -187,9 +137,7 @@ export function GallerySelectionBar({
     onNotice(`Deleting ${itemLabel(paths.length)}…`);
     try {
       for (const path of paths) await deleteFile(path);
-      for (const item of photoSelected) {
-        void setMark(dir, item.entry.name, EMPTY_MARK).catch(() => {});
-      }
+      for (const path of paths) void setMark(dir, baseName(path), EMPTY_MARK).catch(() => {});
       onRemoved(paths);
       onNotice(`Deleted ${itemLabel(paths.length)}`);
       onDone();
@@ -240,43 +188,17 @@ export function GallerySelectionBar({
   }
 
   function requestConfirm(action: PendingAction) {
-    setMenuMode(null);
+    closeChooser();
     setPending((cur) => (cur === action ? null : action));
   }
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (menuMode) {
-        if (e.key === "Escape") return setMenuMode(null);
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          return cycleMenu(-1);
-        }
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          return cycleMenu(1);
-        }
-        if (e.key === "Enter") {
-          e.preventDefault();
-          confirmSelection(menuMode);
-        }
-        return;
-      }
-      if (pending && e.key === "Escape") setPending(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menuMode, menuIndex, pending]);
+  useWindowKeydown((e) => {
+    if (chooser.handleKey(e)) return;
+    if (pending && e.key === "Escape") setPending(null);
+  }, active);
 
   useGamepad((button) => {
-    if (menuMode) {
-      if (button === "b") setMenuMode(null);
-      if (button === "up") cycleMenu(-1);
-      if (button === "down") cycleMenu(1);
-      if (button === "a") confirmSelection(menuMode);
-      return;
-    }
+    if (chooser.handleGamepad(button)) return;
     if (pending) {
       if (button === "b") setPending(null);
       if (button === "a") {
@@ -289,46 +211,21 @@ export function GallerySelectionBar({
       return;
     }
     if (button === "y") requestSend("copy");
-  });
-
-  const barRef = useRef<HTMLDivElement>(null);
+  }, active);
 
   return (
     <>
       {menuMode && (
-        <div className="ph-sel-menu-backdrop" onClick={() => setMenuMode(null)}>
-          <div className="ph-lb-menu ph-sel-menu" onClick={(e) => e.stopPropagation()}>
-            <div className="ph-lb-menu-title">
-              {menuMode === "copy" ? `Copy ${count} to…` : `Move ${count} to…`}
-            </div>
-            {targets.map((t, i) => (
-              <button
-                key={t}
-                type="button"
-                className={`ph-lb-menu-item${i === selIndex ? " ph-lb-menu-item-selected" : ""}`}
-                onClick={() => sendTo(t, menuMode)}
-                onMouseEnter={() => setMenuIndex(i)}
-                title={t}
-              >
-                <FolderInput className="h-4 w-4 shrink-0" />
-                <span className="ph-lb-menu-label">{shortenPath(t)}</span>
-              </button>
-            ))}
-            <button
-              type="button"
-              className={`ph-lb-menu-item ph-lb-menu-browse${selIndex === browseIndex ? " ph-lb-menu-item-selected" : ""}`}
-              onClick={() => browseAndSend(menuMode)}
-              onMouseEnter={() => setMenuIndex(browseIndex)}
-            >
-              <FolderSearch className="h-4 w-4 shrink-0" />
-              <span className="ph-lb-menu-label">Browse…</span>
-            </button>
-            <div className="ph-lb-menu-hint">↑↓ choose · Enter to confirm</div>
-          </div>
-        </div>
+        <DestinationChooser
+          chooser={chooser}
+          title={menuMode === "copy" ? `Copy ${count} to…` : `Move ${count} to…`}
+          hint="↑↓ choose · Enter to confirm"
+          backdropClassName="ph-sel-menu-backdrop"
+          menuClassName="ph-lb-menu ph-sel-menu"
+        />
       )}
 
-      <div className="ph-sel-bar-wrap" ref={barRef}>
+      <div className="ph-sel-bar-wrap">
         <div className="ph-sel-bar" role="toolbar" aria-label="Selection actions">
           <span className="ph-sel-count">
             {count} selected
